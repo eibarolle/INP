@@ -53,14 +53,14 @@ def main(args):
                 search_data_x_all = np.concatenate([search_data_x[i] for i in index], 0)
                 search_data_y_all = np.concatenate([search_data_y[i] for i in index], 0)
 
-                # BoTorch model and acquisition function
+                # BoTorch model/acquisition function
                 train_x = torch.tensor(search_data_x_all, dtype=torch.float32)
                 train_y = torch.tensor(search_data_y_all, dtype=torch.float32).unsqueeze(-1)
                 
                 gp_model = SingleTaskGP(train_x, train_y)
                 mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
 
-                # Manual fitting loop
+                # Adam Optimization
                 optimizer = Adam([{'params': gp_model.parameters()}], lr=0.1)
                 
                 def train_model(num_steps=100):

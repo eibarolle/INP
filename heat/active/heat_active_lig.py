@@ -3,6 +3,7 @@
 
 import torch
 import torch.nn as nn
+print(torch.cuda.device_count())
 import numpy as np
 from numpy.random import binomial
 from botorch.models.model import Model
@@ -26,7 +27,7 @@ from collections import defaultdict
 
 # In[25]:
 
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 #device = torch.device("cuda:2")
 seed = 42
 torch.manual_seed(seed)
@@ -585,21 +586,20 @@ def bayesian_optimization(model, train_x, train_y, bounds, n_iters=10):
     
     return train_x, train_y
 
-# Example usage
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Example
 
 model = DCRNNModel(x_dim, y_dim, r_dim, z_dim).to(device)
 bounds = torch.tensor([[0.0] * x_dim, [1.0] * x_dim], device=device)
 
 # Generate some initial training data
 train_x = torch.rand(10, x_dim, device=device)
-train_y = model(train_x)
+train_y = torch.rand(10, 1, device=device)
 
 # Perform Bayesian optimization
 train_x, train_y = bayesian_optimization(model, train_x, train_y, bounds)
 # Print results
-print("Botorch train_x: ", train_x)
-print("Botorch train_y: ", train_y)
+print("Botorch Example train_x: ", train_x)
+print("Botorch Example train_y: ", train_y)
 
 
 # In[44]:

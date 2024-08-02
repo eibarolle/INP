@@ -22,12 +22,13 @@ from botorch.acquisition import ExpectedImprovement
 from botorch.optim import optimize_acqf
 from botorch.models.model import Model
 from gpytorch.distributions import MultivariateNormal
+from gpytorch.likelihoods import GaussianLikelihood
 
 
 # In[9]:
 
 
-device = torch.device("cuda:1")
+device = torch.device("cuda:0")
 seed = 31
 torch.manual_seed(seed)
 np.random.seed(seed)
@@ -557,18 +558,18 @@ class NeuralProcessModel(Model):
         with torch.no_grad():
             pred = self.forward(X)
             mean = pred.mean(0)
-            covar = torch.eye(len(mean)).to(mean.device)  # Dummy covariance
+            covar = torch.eye(len(mean)).to(mean.device)  # Dummy
             mvn = MultivariateNormal(mean, covar)
             return mvn
 
     def condition_on_observations(self, X, Y, **kwargs):
-        # This function would update the model with new observations
+        # Updates the model with new observations
         pass
 
-# Neural model initialization
+# Neural Model Initialization
 model = NeuralProcessModel(x_dim=4, y_dim=2, r_dim=128, z_dim=64)
 
-# Acquisition function
+# Acquisition Function
 acq_func = ExpectedImprovement(model=model, best_f=0.0)
 
 # Optimization
