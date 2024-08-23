@@ -12,6 +12,7 @@ from gpytorch.distributions import MultivariateNormal
 from botorch.optim import optimize_acqf
 from botorch.acquisition import ExpectedImprovement
 from botorch.models import SingleTaskGP
+from gpytorch.mlls import ExactMarginalLogLikelihood
 #from gpytorch.mlls.exact_marginal_log_likelihood import ExactMarginalLogLikelihood
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -24,6 +25,7 @@ from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
 from sklearn import preprocessing
 from scipy.stats import multivariate_normal
 from collections import defaultdict
+from torch.optim import Adam
 
 # In[25]:
 
@@ -546,123 +548,218 @@ print(pytorch_total_params)
 
 
 # Bayesian optimization setup
-def bayesian_optimization(model, train_x, train_y, bounds, n_iters=10):
-    # Define kernel and Gaussian Process model
-    kernel = C(1.0, (1e-4, 1e1)) * RBF(1.0, (1e-4, 1e1))
-    gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=10, normalize_y=True)
+# def bayesian_optimization(model, train_x, train_y, bounds, n_iters=10):
+#     # Ensure training data is on the correct device
+#     train_x = train_x.to(device)
+#     train_y = train_y.to(device)
 
+#     for iteration in range(n_iters):
+#         # Create a BoTorch GP model
+#         gp = SingleTaskGP(train_x, train_y)
+        
+#         # Fit the GP model manually using Maximum Likelihood Estimation (MLE)
+#         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+#         mll.train()  # Set model to training mode
+
+#         # Use Adam optimizer for the model parameters
+#         optimizer = Adam(gp.parameters(), lr=0.1)
+
+#         # Optimize the model hyperparameters
+#         training_iterations = 100  # Number of iterations to optimize
+#         for _ in range(training_iterations):
+#             optimizer.zero_grad()  # Zero the gradients
+#             output = gp(train_x)  # Forward pass through the model
+#             loss = -mll(output, train_y)  # Compute the negative log likelihood loss
+#             loss = loss.mean()  # Ensure the loss is a scalar
+#             loss.backward()  # Backpropagate to compute gradients
+#             optimizer.step()  # Update model parameters
+
+#         # Switch to evaluation mode after training
+#         gp.eval()
+#         gp.likelihood.eval()
+
+#         # Define acquisition function (Expected Improvement)
+#         ei = ExpectedImprovement(model=gp, best_f=train_y.max())
+
+#         # Optimize acquisition function
+#         candidate, _ = optimize_acqf(
+#             acq_function=ei,
+#             bounds=torch.tensor(bounds, dtype=torch.float32, device=device),
+#             q=1,  # Number of candidates
+#             num_restarts=5,  # Number of random initializations
+#             raw_samples=20,  # Number of raw samples
+#         )
+        
+#         # Evaluate candidate
+#         candidate_y = model(candidate)
+
+#         # Add candidate to training data
+#         train_x = torch.cat([train_x, candidate])
+#         train_y = torch.cat([train_y, candidate_y])
+    
+#     return train_x, train_y
+
+def bayesian_optimization(model, train_x, train_y, bounds, dcrnn, device, n_iters=10, batch_size=5):
+    # Convert to double precision and move to the correct device
+    train_x = torch.from_numpy(train_x).double().to(device)
+    train_y = torch.from_numpy(train_y).double().to(device)
+    bounds = torch.tensor(bounds, dtype=torch.double, device=device)
+    
     for iteration in range(n_iters):
-        # Fit the model
-        gp.fit(train_x, train_y)
+        # Create a BoTorch GP model
+        gp = SingleTaskGP(train_x, train_y)
         
+        # Fit the GP model manually using Maximum Likelihood Estimation (MLE)
+        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+        mll.train()  # Set model to training mode
+
+        # Use Adam optimizer for the model parameters
+        optimizer = Adam(gp.parameters(), lr=0.1)
+
+        # Optimize the model hyperparameters
+        training_iterations = 100  # Number of iterations to optimize
+        for _ in range(training_iterations):
+            optimizer.zero_grad()  # Zero the gradients
+            output = gp(train_x)  # Forward pass through the model
+            loss = -mll(output, train_y)  # Compute the negative log likelihood loss
+            loss = loss.mean()  # Ensure the loss is a scalar
+            loss.backward()  # Backpropagate to compute gradients
+            optimizer.step()  # Update model parameters
+
+        # Switch to evaluation mode after training
+        gp.eval()
+        gp.likelihood.eval()
+
         # Define acquisition function (Expected Improvement)
-        def acquisition_function(x):
-            x = np.atleast_2d(x)
-            mu, sigma = gp.predict(x, return_std=True)
-            mu_sample = gp.predict(train_x)
-            sigma = sigma.reshape(-1, 1)
-            with np.errstate(divide='warn'):
-                imp = mu - np.max(mu_sample) - 0.01
-                Z = imp / sigma
-                ei = imp * norm.cdf(Z) + sigma * norm.pdf(Z)
-                ei[sigma == 0.0] = 0.0
-            return ei
-        
+        ei = ExpectedImprovement(model=gp, best_f=train_y.max())
+
         # Optimize acquisition function
-        candidate = optimize_acqf(
-            acquisition_function=ExpectedImprovement(model=gp, best_f=train_y.max()),
+        candidate, _ = optimize_acqf(
+            acq_function=ei,
             bounds=bounds,
-            q=1,
-            num_restarts=5,
-            raw_samples=20,
-        )[0]
+            q=1,  # Number of candidates
+            num_restarts=5,  # Number of random initializations
+            raw_samples=20,  # Number of raw samples
+        )
 
         # Evaluate candidate
         candidate_y = model(candidate)
+        
+        # Convert candidate and candidate_y to numpy arrays
+        candidate = candidate.cpu().numpy()
+        candidate_y = candidate_y.cpu().numpy()
 
-        # Add candidate to training data
-        train_x = torch.cat([train_x, candidate])
-        train_y = torch.cat([train_y, candidate_y])
+        # Calculate reward for the candidate
+        reward = calculate_score(train_x.cpu().numpy(), train_y.cpu().numpy(), candidate, dcrnn, device)
+
+        # Add candidate to training data based on reward
+        if reward < 0:  # Assuming we want to minimize the score
+            train_x = torch.cat([train_x, torch.from_numpy(candidate).double().to(device)])
+            train_y = torch.cat([train_y, torch.from_numpy(candidate_y).double().to(device)])
     
-    return train_x, train_y
-
-# Example
-
-model = DCRNNModel(x_dim, y_dim, r_dim, z_dim).to(device)
-bounds = torch.tensor([[0.0] * x_dim, [1.0] * x_dim], device=device)
-
-# Generate some initial training data
-train_x = torch.rand(10, x_dim, device=device)
-train_y = torch.rand(10, 1, device=device)
-
-# Perform Bayesian optimization
-train_x, train_y = bayesian_optimization(model, train_x, train_y, bounds)
-# Print results
-print("Botorch Example train_x: ", train_x)
-print("Botorch Example train_y: ", train_y)
+    return train_x.cpu().numpy(), train_y.cpu().numpy()
 
 
 # In[44]:
 
 
-# takes in x and y data, generate two sets, one is x and y in batch, the other is x and y removed from all data
-# returns selected x, selected y, rest of dataset x, rest of dataset y
-def generate_batch(x,y, batch_size):
+# # takes in x and y data, generate two sets, one is x and y in batch, the other is x and y removed from all data
+# # returns selected x, selected y, rest of dataset x, rest of dataset y
+# def generate_batch(x,y, batch_size):
+#     """Helper function to split randomly into context and target"""
+#     ind = np.arange(x.shape[0])
+#     mask = np.random.choice(ind, size=batch_size, replace=False)
+#     return x[mask], y[mask], np.delete(x, mask, axis=0), np.delete(y, mask, axis=0)
+
+
+# # In[86]:
+
+
+# # initialize search_data_x to the dataset with x_init removed
+# def calculate_score(x_train, y_train, x_search):
+#     x_train = torch.from_numpy(x_train).float()
+#     y_train = torch.from_numpy(y_train).float()
+#     x_search = torch.from_numpy(x_search).float()
+#     dcrnn.eval()
+
+#     # query z_mu, z_var of the current training data
+#     with torch.no_grad():
+#         z_mu, z_logvar = data_to_z_params(x_train.to(device),y_train.to(device))
+        
+#         output_list = []
+#         for theta in x_search:
+#             output = dcrnn.decoder(theta, z_mu, z_logvar)
+# #             print("shape of output in calculating score: ", output.shape)
+#             output_list.append(output)
+#         outputs = torch.stack(output_list, dim=0)
+
+#         y_search = outputs.squeeze(2)
+# #         print("shape of y_search: ", y_search.shape)
+# #         print("shape of y_train: ", y_train.shape)
+# #         print("shape of x_train: ", x_train.shape)
+# #         print("shape of x_search: ", x_search.shape)
+
+#         x_search_all = torch.cat([x_train.to(device),x_search.to(device)],dim=0)
+#         y_search_all = torch.cat([y_train.to(device),y_search],dim=0)
+        
+# #         print("shape of y_search_all: ", y_search_all.shape)
+# #         print("shape of x_search_all: ", x_search_all.shape)
+
+#         # generate z_mu_search, z_var_search
+#         z_mu_search, z_logvar_search = data_to_z_params(x_search_all.to(device),y_search_all.to(device), calc_score = True)
+
+#         # calculate and save kld
+#         mu_q, var_q, mu_p, var_p = z_mu_search,  0.1+ 0.9*torch.sigmoid(z_logvar_search), z_mu, 0.1+ 0.9*torch.sigmoid(z_logvar)
+
+#         std_q = torch.sqrt(var_q)
+#         std_p = torch.sqrt(var_p)
+
+#         p = torch.distributions.Normal(mu_p, std_p)
+#         q = torch.distributions.Normal(mu_q, std_q)
+#         score = torch.distributions.kl_divergence(q, p).sum()
+
+
+#     return score
+
+def generate_batch(x, y, batch_size):
     """Helper function to split randomly into context and target"""
     ind = np.arange(x.shape[0])
     mask = np.random.choice(ind, size=batch_size, replace=False)
     return x[mask], y[mask], np.delete(x, mask, axis=0), np.delete(y, mask, axis=0)
 
-
-# In[86]:
-
-
-# initialize search_data_x to the dataset with x_init removed
-def calculate_score(x_train, y_train, x_search):
-    x_train = torch.from_numpy(x_train).float()
-    y_train = torch.from_numpy(y_train).float()
-    x_search = torch.from_numpy(x_search).float()
+def calculate_score(x_train, y_train, x_search, dcrnn, device):
+    x_train = torch.from_numpy(x_train).double().to(device)
+    y_train = torch.from_numpy(y_train).double().to(device)
+    x_search = torch.from_numpy(x_search).double().to(device)
     dcrnn.eval()
 
     # query z_mu, z_var of the current training data
     with torch.no_grad():
-        z_mu, z_logvar = data_to_z_params(x_train.to(device),y_train.to(device))
+        z_mu, z_logvar = data_to_z_params(x_train, y_train)
         
         output_list = []
         for theta in x_search:
             output = dcrnn.decoder(theta, z_mu, z_logvar)
-#             print("shape of output in calculating score: ", output.shape)
             output_list.append(output)
         outputs = torch.stack(output_list, dim=0)
 
         y_search = outputs.squeeze(2)
-#         print("shape of y_search: ", y_search.shape)
-#         print("shape of y_train: ", y_train.shape)
-#         print("shape of x_train: ", x_train.shape)
-#         print("shape of x_search: ", x_search.shape)
 
-        x_search_all = torch.cat([x_train.to(device),x_search.to(device)],dim=0)
-        y_search_all = torch.cat([y_train.to(device),y_search],dim=0)
-        
-#         print("shape of y_search_all: ", y_search_all.shape)
-#         print("shape of x_search_all: ", x_search_all.shape)
+        x_search_all = torch.cat([x_train, x_search], dim=0)
+        y_search_all = torch.cat([y_train, y_search], dim=0)
 
         # generate z_mu_search, z_var_search
-        z_mu_search, z_logvar_search = data_to_z_params(x_search_all.to(device),y_search_all.to(device), calc_score = True)
+        z_mu_search, z_logvar_search = data_to_z_params(x_search_all, y_search_all, calc_score=True)
 
-        # calculate and save kld
-        mu_q, var_q, mu_p, var_p = z_mu_search,  0.1+ 0.9*torch.sigmoid(z_logvar_search), z_mu, 0.1+ 0.9*torch.sigmoid(z_logvar)
-
+        # calculate and save KLD
+        mu_q, var_q, mu_p, var_p = z_mu_search, 0.1 + 0.9 * torch.sigmoid(z_logvar_search), z_mu, 0.1 + 0.9 * torch.sigmoid(z_logvar)
         std_q = torch.sqrt(var_q)
         std_p = torch.sqrt(var_p)
-
         p = torch.distributions.Normal(mu_p, std_p)
         q = torch.distributions.Normal(mu_q, std_q)
-        score = torch.distributions.kl_divergence(q, p).sum()
+        score = kl_divergence(q, p).sum()
 
-
-    return score
-
+    return score.item()
 
 
 # In[45]:
@@ -677,7 +774,7 @@ for i in range(9): #8
     dcrnn.train()
     print('training data shape:', x_train.shape, y_train.shape, flush=True)
 
-    train_losses, val_losses, test_losses, z_mu, z_logvar = train(5000,x_train,y_train,x_val, y_val, x_test, y_test,500, 1000) #20000, 5000
+    train_losses, val_losses, test_losses, z_mu, z_logvar = train(500,x_train,y_train,x_val, y_val, x_test, y_test,50, 100) #20000, 5000
     y_pred_test = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
                       torch.from_numpy(x_test).float())
 #     print("y_pred_shape: ", y_pred_test.shape)

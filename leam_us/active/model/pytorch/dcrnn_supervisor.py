@@ -18,7 +18,7 @@ import csv
 # from model.pytorch.loss import l2_mean_std_loss
 # from torch import autograd
 
-device = torch.device("cuda:1")
+device = torch.device("cuda:0")
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class DCRNNSupervisor:

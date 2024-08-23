@@ -28,7 +28,7 @@ from gpytorch.likelihoods import GaussianLikelihood
 # In[9]:
 
 
-device = torch.device("cuda:0")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 seed = 31
 torch.manual_seed(seed)
 np.random.seed(seed)
@@ -342,6 +342,7 @@ class DCRNNModel(nn.Module):
 #         self.reduce_dm_decoder = nn.Linear(conv_outDim, conv_reduction_dim)
 #         self.reduce_dm_encoder = nn.Linear(conv_outDim, conv_reduction_dim)
         
+        
     # stack x0...xt-1 and x1...xt (seq_len-1, 2,32,32) -> (seq_len-1, 4 ,32,32)
     def stack_y(self, y):
         # x0 -> xt-1
@@ -390,6 +391,34 @@ class DCRNNModel(nn.Module):
         std = 0.1+ 0.9*torch.sigmoid(logvar)
 #         print(mu + std * eps)
         return mu + std * eps
+    
+    def data_to_z(self, x, y, num_z_samples=1):
+        mu, logvar = self.data_to_z_params(x, y)
+        return self.sample_z(mu, logvar, num_z_samples)
+
+    def xy_to_y_pred(self, x, y, x_target, num_z_samples=1):
+        batch_size = x.size(0)
+        self.z_mu_all, self.z_logvar_all = self.data_to_z_params(x, y)
+        z_samples = self.data_to_z(x, y, num_z_samples).view(-1, self.zdim)
+        z_samples = z_samples.unsqueeze(1)
+        h = torch.zeros(batch_size, 1, lstm_hidden_size, dtype=torch.float32).to(device)
+        c = torch.zeros(batch_size, 1, lstm_hidden_size, dtype=torch.float32).to(device)
+        y_pred_all = None
+        for k in range(1):
+            x_tiled = x_target.unsqueeze(0)
+            x_z_pairs = torch.cat([x_tiled, z_samples], dim=2)
+            _, (h, c) = self.decoder_lstm(x_z_pairs, (h, c))
+            x_conv_c = self.conv_encoder_in_decoder(y)
+            h_pred = torch.cat([x_conv_c, x_tiled], dim=2)
+            h_pred = h_pred.view(h_pred.size(0) * h_pred.size(1), h_pred.size(2))
+            h_pred = torch.cat([h_pred, h[-1:,:,:]], dim=1)
+            y_pred = self.deconv(h_pred)
+            y_pred = y_pred.view(batch_size, -1, y_pred.size(1), y_pred.size(2), y_pred.size(3))
+            if y_pred_all is None:
+                y_pred_all = y_pred
+            else:
+                y_pred_all = torch.cat((y_pred_all, y_pred), dim=1)
+        return y_pred_all
 
     def KLD_gaussian(self):
         """Analytical KLD between 2 Gaussians."""

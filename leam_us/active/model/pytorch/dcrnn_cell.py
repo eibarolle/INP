@@ -3,7 +3,7 @@ import torch
 
 from lib import utils
 
-device = torch.device("cuda:1")
+device = torch.device("cuda:0")
 
 
 class LayerParams:
