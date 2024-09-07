@@ -339,8 +339,8 @@ def train(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=50
     min_loss = 0. # for early stopping
     wait = 0
     min_loss = float('inf')
-    
-    for t in range(n_epochs): 
+    print(int(n_epochs / 1000))
+    for t in range(int(n_epochs / 1000)): 
         opt.zero_grad()
         #Generate data and process
         x_context, y_context, x_target, y_target = random_split_context_target(

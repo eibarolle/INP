@@ -234,7 +234,7 @@ class DCRNNSupervisor:
         saved_z_total = None
         saved_val_mae = None
 
-        for epoch_num in range(self._epoch_num, epochs):
+        for epoch_num in range(self._epoch_num, int(epochs / 50)):
 
             self.dcrnn_model = self.dcrnn_model.train()
 
@@ -294,7 +294,7 @@ class DCRNNSupervisor:
 
             if (epoch_num % log_every) == log_every - 1:
                 message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, train_kld: {:.4f}, val_mae: {:.4f}, lr: {:.6f}, ' \
-                          '{:.1f}s'.format(epoch_num, epochs, batches_seen,
+                          '{:.1f}s'.format(epoch_num, float(epochs / 50), batches_seen,
                                            np.mean(mae_losses), np.mean(kld_losses), val_loss, lr_scheduler.get_lr()[0],
                                            (end_time - start_time))
                 self._logger.info(message)
@@ -302,7 +302,7 @@ class DCRNNSupervisor:
             if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1:
                 test_mae_loss, test_rmse_loss, test_outputs = self.evaluate(dataset='test', batches_seen=batches_seen, z_mean_all=self.z_mean_all, z_var_temp_all=self.z_var_temp_all)
                 message = 'Epoch [{}/{}] ({}) test_mae: {:.4f}, test_rmse: {:.4f}, lr: {:.6f}, ' \
-                          '{:.1f}s'.format(epoch_num, epochs, batches_seen,
+                          '{:.1f}s'.format(epoch_num, float(epochs / 50), batches_seen,
                                            test_mae_loss, test_rmse_loss, lr_scheduler.get_lr()[0],
                                            (end_time - start_time))
                 self._logger.info(message)

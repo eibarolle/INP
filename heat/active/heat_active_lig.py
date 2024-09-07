@@ -1,3 +1,8 @@
+
+
+
+
+
 #!/usr/bin/env python
 # coding: utf-8
 
@@ -132,6 +137,12 @@ def MAE(pred, target):
     loss = torch.abs(pred-target.unsqueeze(2))
     return loss.mean()
 
+def MAE_MX(y_pred, y_test):
+    y_pred = y_pred.reshape(160, 5, 2, 32, 32)
+    y_test = y_test[:,1:,...].reshape(160, 5, 2, 32, 32)
+    mae_matrix = np.mean(np.abs(y_pred - y_test),axis=(2,3,4))
+    mae = np.mean(np.abs(y_pred - y_test))
+    return mae_matrix, mae
 
 # In[32]:
 
@@ -452,8 +463,8 @@ def train(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=50
     wait = 0
     min_loss = float('inf')
     dcrnn.train()
-    
-    for t in range(n_epochs): 
+    print(int(n_epochs / 1000))
+    for t in range(int(n_epochs / 1000)): 
         opt.zero_grad()
         #Generate data and process
         x_context, y_context, x_target, y_target = random_split_context_target(
@@ -540,6 +551,9 @@ mask_set = []
 y_pred_test_list = []
 test_mae_list = []
 y_pred_all_list = []
+all_mae_matrix_list = []
+all_mae_list = []
+all_rewards = []
 #number of parameters
 dcrnn = DCRNNModel(x_dim, y_dim, r_dim, z_dim).to(device)
 opt = torch.optim.Adam(dcrnn.parameters(), 1e-3) #1e-3
@@ -599,7 +613,7 @@ print(pytorch_total_params)
     
 #     return train_x, train_y
 
-def bayesian_optimization(model, train_x, train_y, bounds, dcrnn, device, n_iters=10, batch_size=5):
+def bayesian_optimization(model, train_x, train_y, bounds, n_iters=10, batch_size=5):
     # Convert to double precision and move to the correct device
     train_x = torch.from_numpy(train_x).double().to(device)
     train_y = torch.from_numpy(train_y).double().to(device)
@@ -650,7 +664,7 @@ def bayesian_optimization(model, train_x, train_y, bounds, dcrnn, device, n_iter
         candidate_y = candidate_y.cpu().numpy()
 
         # Calculate reward for the candidate
-        reward = calculate_score(train_x.cpu().numpy(), train_y.cpu().numpy(), candidate, dcrnn, device)
+        reward = calculate_score(train_x.cpu().numpy(), train_y.cpu().numpy(), candidate)
 
         # Add candidate to training data based on reward
         if reward < 0:  # Assuming we want to minimize the score
@@ -727,40 +741,84 @@ def generate_batch(x, y, batch_size):
     mask = np.random.choice(ind, size=batch_size, replace=False)
     return x[mask], y[mask], np.delete(x, mask, axis=0), np.delete(y, mask, axis=0)
 
-def calculate_score(x_train, y_train, x_search, dcrnn, device):
-    x_train = torch.from_numpy(x_train).double().to(device)
-    y_train = torch.from_numpy(y_train).double().to(device)
-    x_search = torch.from_numpy(x_search).double().to(device)
+# def calculate_score(x_train, y_train, x_search):
+#     x_train = torch.from_numpy(x_train).double().to(device)
+#     y_train = torch.from_numpy(y_train).double().to(device)
+#     x_search = torch.from_numpy(x_search).double().to(device)
+#     dcrnn.eval()
+
+#     # query z_mu, z_var of the current training data
+#     with torch.no_grad():
+#         z_mu, z_logvar = data_to_z_params(x_train, y_train)
+        
+#         output_list = []
+#         for theta in x_search:
+#             output = dcrnn.decoder(theta, z_mu, z_logvar)
+#             output_list.append(output)
+#         outputs = torch.stack(output_list, dim=0)
+
+#         y_search = outputs.squeeze(2)
+
+#         x_search_all = torch.cat([x_train, x_search], dim=0)
+#         y_search_all = torch.cat([y_train, y_search], dim=0)
+
+#         # generate z_mu_search, z_var_search
+#         z_mu_search, z_logvar_search = data_to_z_params(x_search_all, y_search_all, calc_score=True)
+
+#         # calculate and save KLD
+#         mu_q, var_q, mu_p, var_p = z_mu_search, 0.1 + 0.9 * torch.sigmoid(z_logvar_search), z_mu, 0.1 + 0.9 * torch.sigmoid(z_logvar)
+#         std_q = torch.sqrt(var_q)
+#         std_p = torch.sqrt(var_p)
+#         p = torch.distributions.Normal(mu_p, std_p)
+#         q = torch.distributions.Normal(mu_q, std_q)
+#         score = kl_divergence(q, p).sum()
+
+#     return score.item()
+
+def calculate_score(x_train, y_train, x_search):
+    x_train = torch.from_numpy(x_train).float()
+    y_train = torch.from_numpy(y_train).float()
+    x_search = torch.from_numpy(x_search).float()
     dcrnn.eval()
 
     # query z_mu, z_var of the current training data
     with torch.no_grad():
-        z_mu, z_logvar = data_to_z_params(x_train, y_train)
+        z_mu, z_logvar = data_to_z_params(x_train.to(device),y_train.to(device))
         
         output_list = []
         for theta in x_search:
             output = dcrnn.decoder(theta, z_mu, z_logvar)
+#             print("shape of output in calculating score: ", output.shape)
             output_list.append(output)
         outputs = torch.stack(output_list, dim=0)
 
         y_search = outputs.squeeze(2)
+#         print("shape of y_search: ", y_search.shape)
+#         print("shape of y_train: ", y_train.shape)
+#         print("shape of x_train: ", x_train.shape)
+#         print("shape of x_search: ", x_search.shape)
 
-        x_search_all = torch.cat([x_train, x_search], dim=0)
-        y_search_all = torch.cat([y_train, y_search], dim=0)
+        x_search_all = torch.cat([x_train.to(device),x_search.to(device)],dim=0)
+        y_search_all = torch.cat([y_train.to(device),y_search],dim=0)
+        
+#         print("shape of y_search_all: ", y_search_all.shape)
+#         print("shape of x_search_all: ", x_search_all.shape)
 
         # generate z_mu_search, z_var_search
-        z_mu_search, z_logvar_search = data_to_z_params(x_search_all, y_search_all, calc_score=True)
+        z_mu_search, z_logvar_search = data_to_z_params(x_search_all.to(device),y_search_all.to(device), calc_score = True)
 
-        # calculate and save KLD
-        mu_q, var_q, mu_p, var_p = z_mu_search, 0.1 + 0.9 * torch.sigmoid(z_logvar_search), z_mu, 0.1 + 0.9 * torch.sigmoid(z_logvar)
+        # calculate and save kld
+        mu_q, var_q, mu_p, var_p = z_mu_search,  0.1+ 0.9*torch.sigmoid(z_logvar_search), z_mu, 0.1+ 0.9*torch.sigmoid(z_logvar)
+
         std_q = torch.sqrt(var_q)
         std_p = torch.sqrt(var_p)
+
         p = torch.distributions.Normal(mu_p, std_p)
         q = torch.distributions.Normal(mu_q, std_q)
-        score = kl_divergence(q, p).sum()
+        score = torch.distributions.kl_divergence(q, p).sum()
 
-    return score.item()
 
+    return score
 
 # In[45]:
 
@@ -769,6 +827,10 @@ x_train = np.load('x_train_initial.npy')[:5]
 y_train = np.load('y_train_initial.npy')[:5]
 search_data_x = np.load('search_data_x_initial.npy')
 search_data_y = np.load('search_data_y_initial.npy')
+bounds = torch.tensor([[0.], [1.]], device=device)
+x_opt, y_opt = bayesian_optimization(dcrnn, x_train, y_train, bounds)
+print('x_opt:', torch.from_numpy(x_opt).float())
+print('y_opt:', torch.from_numpy(x_opt).float())
 
 for i in range(9): #8
     dcrnn.train()
@@ -789,7 +851,12 @@ for i in range(9): #8
                       torch.from_numpy(x_all).float())
 #     print("shape of y_pred_all: ", y_pred_all.shape)
     y_pred_all_list.append(y_pred_all)
+    # mae_matrix, mae = MAE_MX(y_pred_all, y_all)
 
+
+    # all_mae_matrix_list.append(mae_matrix)
+    # all_mae_list.append(mae)
+    # print('All MAE:',mae, flush=True)
     
     reward_list = []
     index_list = []
@@ -808,7 +875,9 @@ for i in range(9): #8
     
     search_data_x = [e for i, e in enumerate(search_data_x) if i not in index_list[selected_ind]]
     search_data_y = [e for i, e in enumerate(search_data_y) if i not in index_list[selected_ind]]
-    print('remained scenarios:', len(search_data_x), flush=True)    
+    print('remained scenarios:', len(search_data_x), flush=True) 
+    max_reward = max(reward_list)
+    all_rewards.append(max_reward)   
 
 
 y_pred_all_arr = np.stack(y_pred_all_list,0)
@@ -822,4 +891,35 @@ mae_testset.append(test_mae_arr)
 np.save("ypred_testset_%d" % seed, np.array(ypred_testset))
 np.save("mae_testset_%d" % seed, np.array(mae_testset))
 torch.save(dcrnn.state_dict(), "lig_seed%d_final.pt" % seed)
+
+np.save('test_mae_list.npy', np.array(test_mae_list))
+np.save('all_rewards.npy', np.array(all_rewards))
+# np.save('all_mae_list.npy', np.array(all_mae_list))
+
+plt.figure()
+plt.plot(range(len(test_mae_list)), test_mae_list, marker='o')
+plt.xlabel('Iteration')
+plt.ylabel('Test MAE')
+plt.title('Test MAE over Iterations')
+plt.savefig('test_mae_over_iterations.png')
+plt.close()
+
+plt.figure()
+plt.plot(range(len(all_rewards)), all_rewards, marker='o')
+plt.xlabel('Iteration')
+plt.ylabel('Max Reward')
+plt.title('Max Reward over Iterations')
+plt.savefig('max_reward_over_iterations.png')
+plt.close()
+
+# plt.figure()
+# plt.plot(range(len(all_mae_list)), all_mae_list, marker='o')
+# plt.xlabel('Iteration')
+# plt.ylabel('All MAE')
+# plt.title('All MAE over Iterations')
+# plt.savefig('all_mae_over_iterations.png')
+# plt.close()
+
 print("training done, all results saved")
+
+
