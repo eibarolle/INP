@@ -3,6 +3,8 @@ import time
 
 import numpy as np
 import torch
+import botorch
+from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 
 from lib import utils
@@ -11,6 +13,13 @@ from model.pytorch.loss import mae_loss
 from model.pytorch.loss import mae_metric
 from model.pytorch.loss import rmse_metric
 from model.pytorch.loss import kld_gaussian_loss
+from botorch.optim import optimize_acqf
+from botorch.acquisition import ExpectedImprovement
+from sklearn.ensemble import RandomForestRegressor
+from botorch.models import SingleTaskGP
+from botorch.acquisition import AcquisitionFunction
+from botorch.optim import optimize_acqf
+from gpytorch.mlls import ExactMarginalLogLikelihood
 # from model.pytorch.loss import maxentropy
 import csv
 # from model.pytorch.loss import std_diff
@@ -207,6 +216,83 @@ class DCRNNSupervisor:
 
             return mae_metric, rmse_metric, {'prediction': y_preds_scaled, 'truth': y_truths_scaled}
 
+
+    # def _train_botorch(self, param_ranges, steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, 
+    #                test_every_n_epochs=10, epsilon=1e-8, max_iter=20, **kwargs):
+    #     param_names = list(param_ranges.keys())
+    #     param_bounds = torch.tensor([param_ranges[p] for p in param_names], dtype=torch.float)
+
+    #     # Random initial sampling of hyperparameters
+    #     train_X = torch.rand(5, len(param_ranges))  # Initial random 5 samples
+    #     train_Y = torch.tensor([self._train_iteration(dict(zip(param_names, x.tolist())), steps, patience, epochs, lr_decay_ratio, log_every, test_every_n_epochs, epsilon) for x in train_X])
+
+    #     best_model = None
+    #     best_val_loss = float('inf')
+    #     saved_z_mean_all = None
+    #     saved_z_var_temp_all = None
+    #     saved_model_state = None
+    #     saved_epoch = None
+    #     saved_outputs = None
+    #     saved_val_mae = None
+    #     saved_mae_loss = None
+    #     saved_rmse_loss = None
+
+    #     for bo_iter in range(max_iter):
+    #         # Fit Gaussian Process (GP) model
+    #         gp = SingleTaskGP(train_X, train_Y)
+    #         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+
+    #         # Use Adam optimizer for GP model
+    #         gp_optimizer = Adam(gp.parameters(), lr=gp_lr)
+
+    #         # Manually optimize the GP model
+    #         gp.train()
+    #         for step in range(num_gp_steps):
+    #             gp_optimizer.zero_grad()
+    #             output = gp(train_X)
+    #             loss = -mll(output, train_Y)
+    #             loss.backward()
+    #             gp_optimizer.step()
+
+    #         gp.eval()
+
+    #         # Define Expected Improvement (EI) acquisition function
+    #         ei = ExpectedImprovement(gp, best_f=train_Y.min())
+
+    #         # Optimize the acquisition function
+    #         candidate, _ = optimize_acqf(
+    #             acq_function=ei,
+    #             bounds=param_bounds,
+    #             q=1,
+    #             num_restarts=5,
+    #             raw_samples=20,
+    #         )
+
+    #         # Train model with new candidate parameters and compute the validation loss
+    #         new_params = dict(zip(param_names, candidate[0].tolist()))
+    #         new_val_loss = self._train_iteration(new_params, steps, patience, epochs, lr_decay_ratio, log_every, test_every_n_epochs, epsilon)
+
+    #         train_X = torch.cat([train_X, candidate])
+    #         train_Y = torch.cat([train_Y, new_val_loss.view(-1)])
+
+    #         # Save the best model and associated variables if the validation loss improves
+    #         if new_val_loss < best_val_loss:
+    #             best_val_loss = new_val_loss
+    #             best_model = self.dcrnn_model.state_dict()  # Save the model's state dictionary
+    #             saved_z_mean_all = self.z_mean_all
+    #             saved_z_var_temp_all = self.z_var_temp_all
+    #             saved_epoch = self._epoch_num
+    #             saved_outputs = self.dcrnn_model.saved_outputs  # Save the output predictions
+    #             saved_val_mae = new_val_loss.item()
+    #             saved_mae_loss = self.dcrnn_model.saved_mae_loss  # Save MAE loss
+    #             saved_rmse_loss = self.dcrnn_model.saved_rmse_loss  # Save RMSE loss
+
+    #     # After the loop, save the best model and variables to a file
+    #     model_file_name = self.save_model(saved_epoch, torch.stack([saved_z_mean_all, saved_z_var_temp_all], dim=0), saved_outputs, best_model, saved_val_mae, saved_mae_loss, saved_rmse_loss)
+    #     self._logger.info(f"BoTorch optimization completed. Best model saved at {model_file_name}")
+
+    #     return best_val_loss
+
     def _train(self, base_lr,
                steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, save_model=1,
                test_every_n_epochs=10, epsilon=1e-8, **kwargs):
@@ -234,7 +320,7 @@ class DCRNNSupervisor:
         saved_z_total = None
         saved_val_mae = None
 
-        for epoch_num in range(self._epoch_num, int(epochs / 50)):
+        for epoch_num in range(self._epoch_num, int(epochs / 250)):
 
             self.dcrnn_model = self.dcrnn_model.train()
 
@@ -294,7 +380,7 @@ class DCRNNSupervisor:
 
             if (epoch_num % log_every) == log_every - 1:
                 message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, train_kld: {:.4f}, val_mae: {:.4f}, lr: {:.6f}, ' \
-                          '{:.1f}s'.format(epoch_num, float(epochs / 50), batches_seen,
+                          '{:.1f}s'.format(epoch_num, float(epochs / 250), batches_seen,
                                            np.mean(mae_losses), np.mean(kld_losses), val_loss, lr_scheduler.get_lr()[0],
                                            (end_time - start_time))
                 self._logger.info(message)
@@ -302,7 +388,7 @@ class DCRNNSupervisor:
             if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1:
                 test_mae_loss, test_rmse_loss, test_outputs = self.evaluate(dataset='test', batches_seen=batches_seen, z_mean_all=self.z_mean_all, z_var_temp_all=self.z_var_temp_all)
                 message = 'Epoch [{}/{}] ({}) test_mae: {:.4f}, test_rmse: {:.4f}, lr: {:.6f}, ' \
-                          '{:.1f}s'.format(epoch_num, float(epochs / 50), batches_seen,
+                          '{:.1f}s'.format(epoch_num, float(epochs / 250), batches_seen,
                                            test_mae_loss, test_rmse_loss, lr_scheduler.get_lr()[0],
                                            (end_time - start_time))
                 self._logger.info(message)

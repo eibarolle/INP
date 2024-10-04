@@ -2,10 +2,10 @@
 base_dir: data/model
 log_level: INFO
 data:
-  batch_size: 128 
+  batch_size: 256 
   dataset_dir: data/data
-  test_batch_size: 128
-  val_batch_size: 128
+  test_batch_size: 256
+  val_batch_size: 256
   graph_pkl_filename: data/sensor_graph/adj_mx.pkl
 
 model:
@@ -32,7 +32,7 @@ train:
   base_lr: 0.0008 #0.001
   dropout: 0
   epoch: 0
-  epochs: 500 #120
+  epochs: 5 #120
   epsilon: 1.0e-3
   global_step: 0
   lr_decay_ratio: 0.1
@@ -43,3 +43,4 @@ train:
   patience: 50 #80
   steps: [800] #[20,70] #[25, 50, 75] #[20, 30, 40, 50]
   test_every_n_epochs: 1
+

@@ -249,4 +249,3 @@ class DCRNNModel(nn.Module, Seq2SeqAttrs):
             truth = labels
 
             return output, truth
-

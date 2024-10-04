@@ -7,6 +7,7 @@
 # coding: utf-8
 
 import torch
+import botorch
 import torch.nn as nn
 print(torch.cuda.device_count())
 import numpy as np
@@ -28,6 +29,8 @@ from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
 #                                              ExpSineSquared, DotProduct,
 #                                              ConstantKernel)
 from sklearn import preprocessing
+from sklearn.ensemble import RandomForestRegressor
+from datetime import datetime
 from scipy.stats import multivariate_normal
 from collections import defaultdict
 from torch.optim import Adam
@@ -394,7 +397,7 @@ class DCRNNModel(nn.Module):
 def random_split_context_target(x,y, n_context):
     """Helper function to split randomly into context and target"""
     ind = np.arange(x.shape[0])
-    mask = np.random.choice(ind, size=n_context, replace=False)
+    mask = int(np.random.choice(ind, size=n_context, replace=False))
     return x[mask], y[mask], np.delete(x, mask, axis=0), np.delete(y, mask, axis=0)
 
 def sample_z(mu, logvar,n=1):
@@ -529,6 +532,100 @@ def train(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=50
                 print('Early stopping at epoch: %d' % t)
                 return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
         
+    return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+
+def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=500, patience=5000):
+    train_losses = []
+    val_losses = []
+    test_losses = []
+    min_loss = float('inf')
+    wait = 0
+
+    surrogate_model = RandomForestRegressor(n_estimators=100)
+
+    param_range = np.array([[0.01, 0.5]])  
+
+
+    # Train surrogate model with initial data
+    surrogate_model.fit(x_train, y_train)
+
+    for t in range(n_epochs):
+        if t % (n_epochs // 1000) == 0:
+            # Optimize acquisition function using BoTorch
+            def surrogate_model_predict(X):
+                X = X.detach().cpu().numpy()
+                pred = surrogate_model.predict(X)
+                return torch.tensor(pred).float().unsqueeze(-1)
+
+            class CustomSurrogate(botorch.models.Model):
+                def __init__(self):
+                    super().__init__()
+
+                def posterior(self, X):
+                    mean = surrogate_model_predict(X)
+                    variance = torch.ones_like(mean) * 1e-6
+                    return botorch.posteriors.GPyTorchPosterior(mean, variance)
+
+            custom_surrogate = CustomSurrogate()
+
+            EI = ExpectedImprovement(model=custom_surrogate, best_f=torch.tensor(y_train.min()))
+            candidate, _ = optimize_acqf(
+                EI,
+                bounds=torch.tensor(param_range).float(),
+                q=1,
+                num_restarts=5,
+                raw_samples=20
+            )
+            candidate = candidate.detach().numpy().flatten()[0]
+
+        # Evaluate model using the new candidate (context-target split ratio)
+        opt.zero_grad()
+
+        x_context, y_context, x_target, y_target = random_split_context_target(x_train, y_train, candidate)
+        x_c = torch.from_numpy(x_context).float().to(device)
+        y_c = torch.from_numpy(y_context).float().to(device)
+        x_t = torch.from_numpy(x_target).float().to(device)
+        y_t = torch.from_numpy(y_target).float().to(device)
+
+        x_ct = torch.cat([x_c, x_t], dim=0)
+        y_ct = torch.cat([y_c, y_t], dim=0)
+
+        y_pred = dcrnn(x_t, x_c, y_c, x_ct, y_ct)
+        train_loss = MAE(y_pred, y_t) + dcrnn.KLD_gaussian()
+        train_loss.backward()
+        torch.nn.utils.clip_grad_norm_(dcrnn.parameters(), 5)
+        opt.step()
+
+        # Validation and test loss
+        y_val_pred = test(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float(), torch.from_numpy(x_val).float())
+        val_loss = MAE(torch.from_numpy(y_val_pred).float(), torch.from_numpy(y_val).float())
+        y_test_pred = test(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float(), torch.from_numpy(x_test).float())
+        test_loss = MAE(torch.from_numpy(y_test_pred).float(), torch.from_numpy(y_test).float())
+
+        if t % n_display == 0:
+            print(f'Train Loss: {train_loss.item():.4f}, MAE: {MAE(y_pred, y_t).item():.4f}, KLD: {dcrnn.KLD_gaussian().item():.4f}, Val Loss: {val_loss.item():.4f}, Test Loss: {test_loss.item():.4f}')
+
+            now = datetime.now()
+            current_time = now.strftime("%H:%M:%S")
+            print("Current Time =", current_time, flush=True)
+
+        # Append losses for analysis
+        if t % (n_display // 10) == 0:
+            train_losses.append(train_loss.item())
+            val_losses.append(val_loss.item())
+            test_losses.append(test_loss.item())
+
+        # Early Stopping
+        if val_loss < min_loss:
+            wait = 0
+            min_loss = val_loss
+            print(f'Validation loss improved to {min_loss:.4f} at epoch {t}.')
+        elif val_loss >= min_loss:
+            wait += 1
+            if wait == patience:
+                print(f'Early stopping at epoch {t}.')
+                return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+
     return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
 
 
@@ -828,9 +925,9 @@ y_train = np.load('y_train_initial.npy')[:5]
 search_data_x = np.load('search_data_x_initial.npy')
 search_data_y = np.load('search_data_y_initial.npy')
 bounds = torch.tensor([[0.], [1.]], device=device)
-x_opt, y_opt = bayesian_optimization(dcrnn, x_train, y_train, bounds)
-print('x_opt:', torch.from_numpy(x_opt).float())
-print('y_opt:', torch.from_numpy(x_opt).float())
+#x_opt, y_opt = bayesian_optimization(dcrnn, x_train, y_train, bounds)
+#print('x_opt:', torch.from_numpy(x_opt).float())
+#print('y_opt:', torch.from_numpy(x_opt).float())
 
 for i in range(9): #8
     dcrnn.train()
@@ -877,7 +974,16 @@ for i in range(9): #8
     search_data_y = [e for i, e in enumerate(search_data_y) if i not in index_list[selected_ind]]
     print('remained scenarios:', len(search_data_x), flush=True) 
     max_reward = max(reward_list)
-    all_rewards.append(max_reward)   
+    all_rewards.append(max_reward)
+
+    # # Define acquisition function (e.g., UCB without GP)
+    #     # This acquisition function optimizes a given reward directly without a GP model
+    #     def acquisition_function(X):
+    #         return -torch.tensor(max_reward)
+
+    #     # Optimize acquisition function (e.g., choose next data point)
+    #     acq_func = UpperConfidenceBound(acquisition_function, beta=0.1)
+    #     candidate, _ = optimize_acqf(acq_func, bounds=bounds, q=1, num_restarts=5, raw_samples=20)   
 
 
 y_pred_all_arr = np.stack(y_pred_all_list,0)
