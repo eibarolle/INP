@@ -18,6 +18,8 @@ from sklearn.gaussian_process.kernels import (RBF, Matern, RationalQuadratic,
                                               ExpSineSquared, DotProduct,
                                               ConstantKernel)
 import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import MultiStepLR
 from sklearn import preprocessing
 from scipy.stats import multivariate_normal
 from botorch.models import SingleTaskGP, ModelListGP
@@ -459,83 +461,6 @@ def test(x_train, y_train, x_test):
     
     return output_list.numpy()
 
-# class NeuralProcessModel(Model):
-#     def __init__(self, x_dim, y_dim, r_dim, z_dim):
-#         super().__init__()
-#         self.dcrnn = DCRNNModel(x_dim, y_dim, r_dim, z_dim).to(device)
-#         self.likelihood = GaussianLikelihood()
-
-#     def forward(self, x):
-#         return self.dcrnn(x)
-
-#     def posterior(self, X, observation_noise=False, **kwargs):
-#         with torch.no_grad():
-#             pred = self.forward(X)
-#             mean = pred.mean(0)
-#             covar = torch.eye(len(mean)).to(mean.device)  # Dummy
-#             mvn = MultivariateNormal(mean, covar)
-#             return mvn
-
-#     def condition_on_observations(self, X, Y, **kwargs):
-#         # Updates the model with new observations
-#         pass
-
-#     def num_outputs(self):
-#         # Define the number of output dimensions for the model
-#         return 1 
-
-# # Neural Model Initialization
-# model = NeuralProcessModel(x_dim=4, y_dim=2, r_dim=128, z_dim=64)
-
-# # Acquisition Function
-# acq_func = ExpectedImprovement(model=model, best_f=0.0)
-
-# # Optimization
-# bounds = torch.tensor([[0.0, 0.0], [1.0, 1.0]], device=device)
-# candidate, acq_value = optimize_acqf(
-#     acq_function=acq_func,
-#     bounds=bounds,
-#     q=1,
-#     num_restarts=5,
-#     raw_samples=20,
-# )
-
-# class NPModel(Model):
-#     def __init__(self, x_dim, y_dim, z_dim, r_dim, h_dim):
-#         super(NPModel, self).__init__()
-#         self.encoder = Encoder(x_dim + y_dim, h_dim, r_dim)
-#         self.decoder = Decoder(z_dim + x_dim, h_dim, y_dim)
-#         self.z_dim = z_dim
-
-#     def forward(self, x_context, y_context, x_target):
-#         # Encode the context points
-#         r = self.encoder(torch.cat([x_context, y_context], dim=-1))
-#         r = r.mean(dim=0, keepdim=True)
-        
-#         # Sample latent variable z
-#         z = torch.randn(r.size(0), self.z_dim).to(r.device)
-        
-#         # Decode the target points
-#         y_pred = self.decoder(z, x_target)
-        
-#         return y_pred
-
-#     def posterior(self, x):
-#         # Returns the posterior distribution (mean and variance)
-#         with torch.no_grad():
-#             y_pred = self.forward(x)
-#         return y_pred.mean(dim=0), y_pred.std(dim=0)
-
-# # Bayesian Optimization Integration
-# class NPAcquisitionFunction(AcquisitionFunction):
-#     def __init__(self, model):
-#         super().__init__(model)
-#         self.model = model
-    
-#     def forward(self, x):
-#         mean, std = self.model.posterior(x)
-#         return -mean  # Example: using mean as the acquisition function (can be EI, UCB, etc.)
-
 
 # In[84]:
 
@@ -621,98 +546,218 @@ def train(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=50
         
     return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
 
-def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=500, patience=5000):
+#Revised function
+def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=500, patience = 5000): #7000, 1000
     train_losses = []
+    mae_losses = []
+    kld_losses = []
     val_losses = []
     test_losses = []
-    min_loss = float('inf')
+
+    means_test = []
+    stds_test = []
+    min_loss = 0. # for early stopping
     wait = 0
+    min_loss = float('inf')
+    dcrnn.train()
+    print(int(n_epochs / 1000))
 
-    # Surrogate model for Bayesian Optimization (RandomForestRegressor for simplicity)
-    surrogate_model = RandomForestRegressor(n_estimators=100)
+    # Hyperparameter search bounds (you can add more hyperparameters here)
+    lr_bounds = torch.tensor([[1e-4], [1e-2]], dtype=torch.float64)  
 
-    param_range = np.array([[0.01, 0.5]]) 
 
-    # Train surrogate model with initial data
-    surrogate_model.fit(x_train, y_train)
+    for t in range(int(n_epochs / 1000)): 
+        gp_train_x = torch.tensor(x_train, dtype=torch.float64)
+        gp_train_y = torch.tensor(y_train, dtype=torch.float64).unsqueeze(-1)
+        x_mean = gp_train_x.mean(0)
+        x_std = gp_train_x.std(0) if gp_train_x.size(0) > 1 else torch.ones_like(x_mean)
 
-    for t in range(n_epochs):
-        if t % (n_epochs // 1000) == 0:
-            # Optimize acquisition function using BoTorch
-            def surrogate_model_predict(X):
-                X = X.detach().cpu().numpy()
-                pred = surrogate_model.predict(X)
-                return torch.tensor(pred).float().unsqueeze(-1)
+        y_mean = gp_train_y.mean()
+        y_std = gp_train_y.std() if gp_train_y.size(0) > 1 else torch.ones_like(y_mean)
 
-            class CustomSurrogate(botorch.models.Model):
-                def __init__(self):
-                    super().__init__()
+        gp_train_x = (gp_train_x - x_mean) / x_std
+        gp_train_y = (gp_train_y - y_mean) / y_std
+        gp = SingleTaskGP(gp_train_x, gp_train_y)
+        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+        mll.train()
 
-                def posterior(self, X):
-                    mean = surrogate_model_predict(X)
-                    variance = torch.ones_like(mean) * 1e-6
-                    return botorch.posteriors.GPyTorchPosterior(mean, variance)
+        optimizer_gp = torch.optim.Adam(gp.parameters(), lr=0.1)
+        optimizer_gp.zero_grad()
+        output = gp(gp_train_x)
+        loss = -mll(output, gp_train_y)
+        loss.backward(torch.ones_like(loss))
+        optimizer_gp.step()
 
-            custom_surrogate = CustomSurrogate()
+        ei = ExpectedImprovement(model=gp, best_f=gp_train_y.max())
 
-            EI = ExpectedImprovement(model=custom_surrogate, best_f=torch.tensor(y_train.min()))
-            candidate, _ = optimize_acqf(
-                EI,
-                bounds=torch.tensor(param_range).float(),
-                q=1,
-                num_restarts=5,
-                raw_samples=20
-            )
-            candidate = candidate.detach().numpy().flatten()[0]
-
+        candidate, _ = optimize_acqf(
+            acq_function=ei,
+            bounds=lr_bounds,
+            q=1,  # Suggest one candidate at a time
+            num_restarts=5,
+            raw_samples=20
+        )
+        current_lr = candidate.item()
+        opt = torch.optim.Adam(lr=current_lr)
         opt.zero_grad()
+        #Generate data and process
+        x_context, y_context, x_target, y_target = random_split_context_target(
+                                x_train, y_train, int(len(y_train)*0.2))
 
-        x_context, y_context, x_target, y_target = random_split_context_target(x_train, y_train, candidate)
         x_c = torch.from_numpy(x_context).float().to(device)
-        y_c = torch.from_numpy(y_context).float().to(device)
         x_t = torch.from_numpy(x_target).float().to(device)
+        y_c = torch.from_numpy(y_context).float().to(device)
         y_t = torch.from_numpy(y_target).float().to(device)
 
-        x_ct = torch.cat([x_c, x_t], dim=0)
-        y_ct = torch.cat([y_c, y_t], dim=0)
+        x_ct = torch.cat([x_c, x_t], dim=0).float().to(device)
+        y_ct = torch.cat([y_c, y_t], dim=0).float().to(device)
 
         y_pred = dcrnn(x_t, x_c, y_c, x_ct, y_ct)
+        
+#         print("shape of y_pred: ", y_pred.shape)
+#         print("shape of y_t: ", y_t.shape)
+
         train_loss = MAE(y_pred, y_t) + dcrnn.KLD_gaussian()
+        mae_loss = MAE(y_pred, y_t)
+        kld_loss = dcrnn.KLD_gaussian()
+        
         train_loss.backward()
-        torch.nn.utils.clip_grad_norm_(dcrnn.parameters(), 5)
+        torch.nn.utils.clip_grad_norm_(dcrnn.parameters(), 5) #10
         opt.step()
+        
+        #val loss
+        y_val_pred = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
+                      torch.from_numpy(x_val).float())
+#         print("shape of y_val_pred: ", y_val_pred.shape)
+#         print("shape of y_val: ", y_val.shape)
+        val_loss = MAE(torch.from_numpy(y_val_pred).float(),torch.from_numpy(y_val).float())
+        #test loss
+        y_test_pred = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
+                      torch.from_numpy(x_test).float())
+        test_loss = MAE(torch.from_numpy(y_test_pred).float(),torch.from_numpy(y_test).float())
 
-        # Validation and test loss
-        y_val_pred = test(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float(), torch.from_numpy(x_val).float())
-        val_loss = MAE(torch.from_numpy(y_val_pred).float(), torch.from_numpy(y_val).float())
-        y_test_pred = test(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float(), torch.from_numpy(x_test).float())
-        test_loss = MAE(torch.from_numpy(y_test_pred).float(), torch.from_numpy(y_test).float())
+        if t % n_display ==0:
+            print('train loss:', train_loss.item(), 'mae:', mae_loss.item(), 'kld:', kld_loss.item(), flush=True)
+            print('val loss:', val_loss.item(), 'test loss:', test_loss.item(), flush=True)
+            ypred_allset.append(y_pred)
+#             print(y_train)
 
-        if t % n_display == 0:
-            print(f'Train Loss: {train_loss.item():.4f}, MAE: {MAE(y_pred, y_t).item():.4f}, KLD: {dcrnn.KLD_gaussian().item():.4f}, Val Loss: {val_loss.item():.4f}, Test Loss: {test_loss.item():.4f}')
-
-            now = datetime.now()
-            current_time = now.strftime("%H:%M:%S")
-            print("Current Time =", current_time, flush=True)
-
-        # Append losses for analysis
-        if t % (n_display // 10) == 0:
+        if t % (n_display/10) ==0:
             train_losses.append(train_loss.item())
             val_losses.append(val_loss.item())
             test_losses.append(test_loss.item())
-
-        # Early Stopping
+#             mae_losses.append(mae_loss.item())
+#             kld_losses.append(kld_loss.item())
+        
+#         if train_loss.item() < 10:
+#             return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+        
+#         #early stopping
         if val_loss < min_loss:
             wait = 0
             min_loss = val_loss
-            print(f'Validation loss improved to {min_loss:.4f} at epoch {t}.')
+            
         elif val_loss >= min_loss:
             wait += 1
             if wait == patience:
-                print(f'Early stopping at epoch {t}.')
+                print('Early stopping at epoch: %d' % t)
                 return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
-
+        
     return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+
+#Old Function
+# def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=500, patience=5000):
+#     train_losses = []
+#     val_losses = []
+#     test_losses = []
+#     min_loss = float('inf')
+#     wait = 0
+
+#     # Surrogate model for Bayesian Optimization (RandomForestRegressor for simplicity)
+#     surrogate_model = RandomForestRegressor(n_estimators=100)
+
+#     param_range = np.array([[0.01, 0.5]]) 
+
+#     # Train surrogate model with initial data
+#     surrogate_model.fit(x_train, y_train)
+
+#     for t in range(n_epochs):
+#         if t % (n_epochs // 1000) == 0:
+#             # Optimize acquisition function using BoTorch
+#             def surrogate_model_predict(X):
+#                 X = X.detach().cpu().numpy()
+#                 pred = surrogate_model.predict(X)
+#                 return torch.tensor(pred).float().unsqueeze(-1)
+
+#             class CustomSurrogate(botorch.models.Model):
+#                 def __init__(self):
+#                     super().__init__()
+
+#                 def posterior(self, X):
+#                     mean = surrogate_model_predict(X)
+#                     variance = torch.ones_like(mean) * 1e-6
+#                     return botorch.posteriors.GPyTorchPosterior(mean, variance)
+
+#             custom_surrogate = CustomSurrogate()
+
+#             EI = ExpectedImprovement(model=custom_surrogate, best_f=torch.tensor(y_train.min()))
+#             candidate, _ = optimize_acqf(
+#                 EI,
+#                 bounds=torch.tensor(param_range).float(),
+#                 q=1,
+#                 num_restarts=5,
+#                 raw_samples=20
+#             )
+#             candidate = candidate.detach().numpy().flatten()[0]
+
+#         opt.zero_grad()
+
+#         x_context, y_context, x_target, y_target = random_split_context_target(x_train, y_train, candidate)
+#         x_c = torch.from_numpy(x_context).float().to(device)
+#         y_c = torch.from_numpy(y_context).float().to(device)
+#         x_t = torch.from_numpy(x_target).float().to(device)
+#         y_t = torch.from_numpy(y_target).float().to(device)
+
+#         x_ct = torch.cat([x_c, x_t], dim=0)
+#         y_ct = torch.cat([y_c, y_t], dim=0)
+
+#         y_pred = dcrnn(x_t, x_c, y_c, x_ct, y_ct)
+#         train_loss = MAE(y_pred, y_t) + dcrnn.KLD_gaussian()
+#         train_loss.backward()
+#         torch.nn.utils.clip_grad_norm_(dcrnn.parameters(), 5)
+#         opt.step()
+
+#         # Validation and test loss
+#         y_val_pred = test(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float(), torch.from_numpy(x_val).float())
+#         val_loss = MAE(torch.from_numpy(y_val_pred).float(), torch.from_numpy(y_val).float())
+#         y_test_pred = test(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float(), torch.from_numpy(x_test).float())
+#         test_loss = MAE(torch.from_numpy(y_test_pred).float(), torch.from_numpy(y_test).float())
+
+#         if t % n_display == 0:
+#             print(f'Train Loss: {train_loss.item():.4f}, MAE: {MAE(y_pred, y_t).item():.4f}, KLD: {dcrnn.KLD_gaussian().item():.4f}, Val Loss: {val_loss.item():.4f}, Test Loss: {test_loss.item():.4f}')
+
+#             now = datetime.now()
+#             current_time = now.strftime("%H:%M:%S")
+#             print("Current Time =", current_time, flush=True)
+
+#         # Append losses for analysis
+#         if t % (n_display // 10) == 0:
+#             train_losses.append(train_loss.item())
+#             val_losses.append(val_loss.item())
+#             test_losses.append(test_loss.item())
+
+#         # Early Stopping
+#         if val_loss < min_loss:
+#             wait = 0
+#             min_loss = val_loss
+#             print(f'Validation loss improved to {min_loss:.4f} at epoch {t}.')
+#         elif val_loss >= min_loss:
+#             wait += 1
+#             if wait == patience:
+#                 print(f'Early stopping at epoch {t}.')
+#                 return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+
+#     return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
 
 
 def generate_batch(x,y, batch_size):

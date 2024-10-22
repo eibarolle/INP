@@ -467,7 +467,40 @@ def train(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=50
     min_loss = float('inf')
     dcrnn.train()
     print(int(n_epochs / 1000))
+    lr_bounds = torch.tensor([[1e-4], [1e-2]], dtype=torch.float64)  
     for t in range(int(n_epochs / 1000)): 
+        gp_train_x = torch.tensor(x_train, dtype=torch.float64)
+        gp_train_y = torch.tensor(y_train, dtype=torch.float64).unsqueeze(-1)
+        x_mean = gp_train_x.mean(0)
+        x_std = gp_train_x.std(0) if gp_train_x.size(0) > 1 else torch.ones_like(x_mean)
+
+        y_mean = gp_train_y.mean()
+        y_std = gp_train_y.std() if gp_train_y.size(0) > 1 else torch.ones_like(y_mean)
+
+        gp_train_x = (gp_train_x - x_mean) / x_std
+        gp_train_y = (gp_train_y - y_mean) / y_std
+        gp = SingleTaskGP(gp_train_x, gp_train_y)
+        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+        mll.train()
+
+        optimizer_gp = torch.optim.Adam(gp.parameters(), lr=0.1)
+        optimizer_gp.zero_grad()
+        output = gp(gp_train_x)
+        loss = -mll(output, gp_train_y)
+        loss.backward(torch.ones_like(loss))
+        optimizer_gp.step()
+
+        ei = ExpectedImprovement(model=gp, best_f=gp_train_y.max())
+
+        candidate, _ = optimize_acqf(
+            acq_function=ei,
+            bounds=lr_bounds,
+            q=1,  # Suggest one candidate at a time
+            num_restarts=5,
+            raw_samples=20
+        )
+        current_lr = candidate.item()
+        opt = torch.optim.Adam(lr=current_lr)
         opt.zero_grad()
         #Generate data and process
         x_context, y_context, x_target, y_target = random_split_context_target(

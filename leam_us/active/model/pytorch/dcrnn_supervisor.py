@@ -1,11 +1,13 @@
 import os
 import time
+import random
 
 import numpy as np
 import torch
 import botorch
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import MultiStepLR
 
 from lib import utils
 from model.pytorch.dcrnn_model import DCRNNModel
@@ -157,6 +159,12 @@ class DCRNNSupervisor:
     def train(self, **kwargs):
         kwargs.update(self._train_kwargs)
         return self._train(**kwargs)
+    
+    def train_botorch(self, **kwargs):
+        kwargs.update(self._train_kwargs)
+        return self._train_botorch(**kwargs)
+    
+    test_mae = None
 
     def acquisition(self, search_data_x, search_data_y, batches_seen=0):
         """
@@ -291,7 +299,360 @@ class DCRNNSupervisor:
     #     model_file_name = self.save_model(saved_epoch, torch.stack([saved_z_mean_all, saved_z_var_temp_all], dim=0), saved_outputs, best_model, saved_val_mae, saved_mae_loss, saved_rmse_loss)
     #     self._logger.info(f"BoTorch optimization completed. Best model saved at {model_file_name}")
 
-    #     return best_val_loss
+    #    return best_val_loss
+
+    # def _train_botorch(self, base_lr, steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, save_model=1,
+    #                 test_every_n_epochs=10, epsilon=1e-8, bo_iter=10, **kwargs):
+
+    #     min_val_loss = float('inf')
+    #     wait = 0
+
+    #     # Initial setup for optimizer and scheduler
+    #     optimizer = torch.optim.Adam(self.dcrnn_model.parameters(), lr=base_lr, eps=epsilon)
+    #     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=steps, gamma=lr_decay_ratio)
+
+    #     self._logger.info('Start training ...')
+
+    #     # Ensure numerical stability by converting data to double precision
+    #     self.num_batches = self._data['train_loader'].num_batch
+    #     self._logger.info("num_batches:{}".format(self.num_batches))
+
+    #     batches_seen = self.num_batches * self._epoch_num
+
+    #     saved_model = dict()
+    #     saved_output = dict()
+    #     saved_mae = None
+    #     saved_rmse = None
+    #     saved_epoch = None
+    #     saved_z_total = None
+    #     saved_val_mae = None
+
+    #     # BoTorch data storage for optimization
+    #     bo_train_x = []
+    #     bo_train_y = []
+
+    #     # Hyperparameter search bounds (you can add more hyperparameters here)
+    #     lr_bounds = torch.tensor([[1e-4], [1e-2]], dtype=torch.float64)  # Learning rate bounds
+
+    #     for bo_itr in range(bo_iter):
+    #         self._logger.info(f"BoTorch iteration {bo_itr+1}/{bo_iter}")
+
+    #         # Use random values for the first iteration, then BoTorch will suggest values
+    #         if bo_itr == 0:
+    #             current_lr = random.uniform(lr_bounds[0].item(), lr_bounds[1].item())
+    #         else:
+    #             # Train GP model with double precision and standardized data
+    #             gp_train_x = torch.tensor(bo_train_x, dtype=torch.float64)
+    #             gp_train_y = torch.tensor(bo_train_y, dtype=torch.float64).unsqueeze(-1)
+
+    #             # Standardize gp_train_x and gp_train_y
+    #             gp_train_x = (gp_train_x - gp_train_x.mean()) / gp_train_x.std()
+    #             gp_train_y = (gp_train_y - gp_train_y.mean()) / gp_train_y.std()
+
+    #             gp = SingleTaskGP(gp_train_x, gp_train_y)
+    #             mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+    #             mll.train()
+
+    #             optimizer_gp = torch.optim.Adam(gp.parameters(), lr=0.1)
+    #             optimizer_gp.zero_grad()
+    #             output = gp(gp_train_x)
+    #             loss = -mll(output, gp_train_y)
+    #             loss.backward()
+    #             optimizer_gp.step()
+
+    #             # Define acquisition function (EI)
+    #             ei = ExpectedImprovement(model=gp, best_f=gp_train_y.max())
+
+    #             # Optimize acquisition function to suggest the next learning rate
+    #             candidate, _ = optimize_acqf(
+    #                 acq_function=ei,
+    #                 bounds=lr_bounds,
+    #                 q=1,  # Suggest one candidate at a time
+    #                 num_restarts=5,
+    #                 raw_samples=20
+    #             )
+    #             current_lr = candidate.item()
+
+    #         # Update optimizer with new learning rate suggested by BoTorch
+    #         optimizer = torch.optim.Adam(self.dcrnn_model.parameters(), lr=current_lr, eps=epsilon)
+    #         lr_scheduler = MultiStepLR(optimizer, milestones=steps, gamma=lr_decay_ratio)
+
+    #         # Epoch loop
+    #         for epoch_num in range(self._epoch_num, epochs):
+
+    #             self.dcrnn_model = self.dcrnn_model.train()
+
+    #             train_iterator = self._data['train_loader'].get_iterator()
+    #             losses = []
+    #             mae_losses = []
+    #             kld_losses = []
+    #             z_mean_all_list = []
+    #             z_var_temp_all_list = []
+
+    #             start_time = time.time()
+
+    #             for _, (x, y, x0) in enumerate(train_iterator):
+    #                 optimizer.zero_grad()
+
+    #                 x, y, x0 = self._prepare_data(x, y, x0)
+
+    #                 # Ensure the input data is in double precision
+    #                 x, y, x0 = x.to(torch.float64), y.to(torch.float64), x0.to(torch.float64)
+
+    #                 output, y_t, z_mean_all_sub, z_var_temp_all_sub, z_mean_context_sub, z_var_temp_context_sub = self.dcrnn_model(x, y, x0, batches_seen)
+
+    #                 if batches_seen == 0:
+    #                     optimizer = torch.optim.Adam(self.dcrnn_model.parameters(), lr=current_lr, eps=epsilon)
+    #                     lr_scheduler = MultiStepLR(optimizer, milestones=steps, gamma=lr_decay_ratio)
+
+    #                 mae_loss, kld_loss = self._compute_loss(y_t, output, z_mean_all_sub, z_var_temp_all_sub, z_mean_context_sub, z_var_temp_context_sub)
+    #                 loss = mae_loss + kld_loss
+
+    #                 self._logger.debug(loss.item())
+
+    #                 losses.append(loss.item())
+    #                 mae_losses.append(mae_loss.item())
+    #                 kld_losses.append(kld_loss.item())
+    #                 z_mean_all_list.append(z_mean_all_sub)
+    #                 z_var_temp_all_list.append(z_var_temp_all_sub)
+
+    #                 batches_seen += 1
+    #                 loss.backward()
+
+    #                 # Gradient clipping
+    #                 torch.nn.utils.clip_grad_norm_(self.dcrnn_model.parameters(), self.max_grad_norm)
+    #                 optimizer.step()
+
+    #             # Calculate z_mean_all and z_var_temp_all
+    #             self.z_mean_all = torch.mean(torch.stack(z_mean_all_list, 0), 0)
+    #             self.z_var_temp_all = torch.mean(torch.stack(z_var_temp_all_list, 0), 0)
+
+    #             self._logger.info("Epoch complete")
+    #             lr_scheduler.step()
+    #             self._logger.info("Evaluating...")
+
+    #             val_loss, _, _ = self.evaluate(dataset='val', batches_seen=batches_seen, z_mean_all=self.z_mean_all, z_var_temp_all=self.z_var_temp_all)
+    #             end_time = time.time()
+
+    #             self._writer.add_scalar('training loss', np.mean(losses), batches_seen)
+
+    #             if (epoch_num % log_every) == log_every - 1:
+    #                 message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, train_kld: {:.4f}, val_mae: {:.4f}, lr: {:.6f}, {:.1f}s'.format(
+    #                     epoch_num, epochs, batches_seen, np.mean(mae_losses), np.mean(kld_losses), val_loss, current_lr, (end_time - start_time))
+    #                 self._logger.info(message)
+
+    #             if val_loss < min_val_loss:
+    #                 wait = 0
+    #                 self._logger.info('Val loss decrease from {:.4f} to {:.4f}.'.format(min_val_loss, val_loss))
+    #                 min_val_loss = val_loss
+
+    #                 saved_model = self.dcrnn_model.state_dict()
+    #                 saved_val_mae = val_loss
+    #                 saved_mae = val_loss
+    #                 saved_rmse = val_loss
+    #                 saved_outputs = None
+    #                 saved_epoch = epoch_num
+    #                 saved_z_total = torch.stack([self.z_mean_all, self.z_var_temp_all], dim=0)
+
+    #             elif val_loss >= min_val_loss:
+    #                 wait += 1
+    #                 if wait == patience:
+    #                     model_file_name = self.save_model(saved_epoch, saved_z_total, saved_outputs, saved_model, saved_val_mae, saved_mae, saved_rmse)
+    #                     self._logger.info('Final Val loss {:.4f}, Test MAE loss {:.4f}, Test RMSE loss {:.4f}, saving to {}'.format(saved_val_mae, saved_mae, saved_rmse, model_file_name))
+    #                     self._logger.warning('Early stopping at epoch: %d' % epoch_num)
+    #                     break
+
+    #         bo_train_x.append([current_lr])
+    #         bo_train_y.append(val_loss.item())
+
+    #     model_file_name = self.save_model(saved_epoch, saved_z_total, saved_outputs, saved_model, saved_val_mae, saved_mae, saved_rmse)
+    #     self._logger.info('Final Val loss {:.4f}, Test MAE loss {:.4f}, Test RMSE loss {:.4f}, saving to {}'.format(saved_val_mae, saved_mae, saved_rmse, model_file_name))
+
+    def _train_botorch(self, base_lr,
+           steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, save_model=1,
+           test_every_n_epochs=10, epsilon=1e-8, bo_iter=10, **kwargs):
+
+        min_val_loss = float('inf')
+        wait = 0
+
+        # Initial setup for optimizer and scheduler
+        optimizer = torch.optim.Adam(self.dcrnn_model.parameters(), lr=base_lr, eps=epsilon)
+        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=steps, gamma=lr_decay_ratio)
+
+        self._logger.info('Start training ...')
+
+        # this will fail if model is loaded with a changed batch_size
+        self.num_batches = self._data['train_loader'].num_batch
+        self._logger.info("num_batches:{}".format(self.num_batches))
+
+        batches_seen = self.num_batches * self._epoch_num
+
+        saved_model = dict()
+        saved_output = dict()
+        saved_mae = None
+        saved_rmse = None
+        saved_epoch = None
+        saved_z_total = None
+        saved_val_mae = None
+
+        train_x = []
+        train_y = []
+
+        # Hyperparameter search bounds (you can add more hyperparameters here)
+        lr_bounds = torch.tensor([[1e-4], [1e-2]], dtype=torch.float64)  
+
+        for bo_itr in range(bo_iter):
+            self._logger.info(f"BoTorch iteration {bo_itr+1}/{bo_iter}")
+
+            # First iteration switch
+            if bo_itr == 0:
+                current_lr = random.uniform(lr_bounds[0].item(), lr_bounds[1].item())
+            else:
+                # Train GP model
+                gp_train_x = torch.tensor(train_x, dtype=torch.float64)
+                gp_train_y = torch.tensor(train_y, dtype=torch.float64).unsqueeze(-1)
+                x_mean = gp_train_x.mean(0)
+                x_std = gp_train_x.std(0) if gp_train_x.size(0) > 1 else torch.ones_like(x_mean)
+
+                y_mean = gp_train_y.mean()
+                y_std = gp_train_y.std() if gp_train_y.size(0) > 1 else torch.ones_like(y_mean)
+
+                # Standardization
+                gp_train_x = (gp_train_x - x_mean) / x_std
+                gp_train_y = (gp_train_y - y_mean) / y_std
+                gp = SingleTaskGP(gp_train_x, gp_train_y)
+                mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+                mll.train()
+
+                optimizer_gp = torch.optim.Adam(gp.parameters(), lr=0.1)
+                optimizer_gp.zero_grad()
+                output = gp(gp_train_x)
+                loss = -mll(output, gp_train_y)
+                loss.backward(torch.ones_like(loss))
+                optimizer_gp.step()
+
+                ei = ExpectedImprovement(model=gp, best_f=gp_train_y.max())
+
+                candidate, _ = optimize_acqf(
+                    acq_function=ei,
+                    bounds=lr_bounds,
+                    q=1,  # Suggest one candidate at a time
+                    num_restarts=5,
+                    raw_samples=20
+                )
+                current_lr = candidate.item()
+
+            # Update optimizer with BoTorch learning rate
+            optimizer = torch.optim.Adam(self.dcrnn_model.parameters(), lr=current_lr, eps=epsilon)
+            lr_scheduler = MultiStepLR(optimizer, milestones=steps, gamma=lr_decay_ratio)
+
+            # Epoch loop
+            for epoch_num in range(self._epoch_num, epochs):
+
+                self.dcrnn_model = self.dcrnn_model.train()
+
+                train_iterator = self._data['train_loader'].get_iterator()
+                losses = []
+                mae_losses = []
+                kld_losses = []
+                z_mean_all_list = []
+                z_var_temp_all_list = []
+
+                start_time = time.time()
+
+                for _, (x, y, x0) in enumerate(train_iterator):
+                    optimizer.zero_grad()
+
+                    x, y, x0 = self._prepare_data(x, y, x0)
+
+                    output, y_t, z_mean_all_sub, z_var_temp_all_sub, z_mean_context_sub, z_var_temp_context_sub = self.dcrnn_model(x, y, x0, batches_seen)
+
+                    if batches_seen == 0:
+                        # Re-initialize optimizer in the first batch
+                        optimizer = torch.optim.Adam(self.dcrnn_model.parameters(), lr=current_lr, eps=epsilon)
+                        lr_scheduler = MultiStepLR(optimizer, milestones=steps, gamma=lr_decay_ratio)
+
+                    mae_loss, kld_loss = self._compute_loss(y_t, output, z_mean_all_sub, z_var_temp_all_sub, z_mean_context_sub, z_var_temp_context_sub)
+                    loss = mae_loss + kld_loss
+
+                    self._logger.debug(loss.item())
+
+                    losses.append(loss.item())
+                    mae_losses.append(mae_loss.item())
+                    kld_losses.append(kld_loss.item())
+                    z_mean_all_list.append(z_mean_all_sub)
+                    z_var_temp_all_list.append(z_var_temp_all_sub)
+
+                    batches_seen += 1
+                    loss.backward()
+
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(self.dcrnn_model.parameters(), self.max_grad_norm)
+                    optimizer.step()
+
+                # Calculate z_mean_all and z_var_temp_all
+                self.z_mean_all = torch.mean(torch.stack(z_mean_all_list, 0), 0)
+                self.z_var_temp_all = torch.mean(torch.stack(z_var_temp_all_list, 0), 0)
+
+                self._logger.info("Epoch complete")
+                lr_scheduler.step()
+                self._logger.info("Evaluating...")
+
+                val_loss, _, _ = self.evaluate(dataset='val', batches_seen=batches_seen, z_mean_all=self.z_mean_all, z_var_temp_all=self.z_var_temp_all)
+                end_time = time.time()
+
+                # Logging to tensorboard
+                self._writer.add_scalar('training loss', np.mean(losses), batches_seen)
+
+                # Logging info every 'log_every' epochs
+                if (epoch_num % log_every) == log_every - 1:
+                    message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, train_kld: {:.4f}, val_mae: {:.4f}, lr: {:.6f}, ' \
+                            '{:.1f}s'.format(epoch_num, epochs, batches_seen,
+                                            np.mean(mae_losses), np.mean(kld_losses), val_loss, current_lr,
+                                            (end_time - start_time))
+                    self._logger.info(message)
+
+                if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1:
+                    test_mae_loss, test_rmse_loss, test_outputs = self.evaluate(dataset='test', batches_seen=batches_seen, z_mean_all=self.z_mean_all, z_var_temp_all=self.z_var_temp_all)
+                    message = 'Epoch [{}/{}] ({}) test_mae: {:.4f}, test_rmse: {:.4f}, lr: {:.6f}, ' \
+                            '{:.1f}s'.format(epoch_num, epochs, batches_seen,
+                                            test_mae_loss, test_rmse_loss, lr_scheduler.get_lr()[0],
+                                            (end_time - start_time))
+                    self._logger.info(message)
+
+                if val_loss < min_val_loss:
+                    wait = 0
+                    self._logger.info(
+                        'Val loss decrease from {:.4f} to {:.4f}.'.format(min_val_loss, val_loss))
+                    min_val_loss = val_loss
+
+                    saved_model = self.dcrnn_model.state_dict()
+                    saved_val_mae = val_loss
+                    saved_mae = test_mae_loss
+                    saved_rmse = test_rmse_loss
+                    saved_outputs = test_outputs
+                    saved_epoch = epoch_num
+                    saved_z_total = torch.stack([self.z_mean_all, self.z_var_temp_all], dim=0)
+
+                elif val_loss >= min_val_loss:
+                    wait += 1
+                    if wait == patience:
+                        model_file_name = self.save_model(saved_epoch, saved_z_total, saved_outputs, saved_model, saved_val_mae, saved_mae, saved_rmse)
+                        self.test_mae = saved_mae
+                        self._logger.info(
+                            'Final Val loss {:.4f}, Test MAE loss {:.4f}, Test RMSE loss {:.4f}, '
+                            'saving to {}'.format(saved_val_mae, saved_mae, saved_rmse, model_file_name))
+                        self._logger.warning('Early stopping at epoch: %d' % epoch_num)
+                        break
+
+            train_x.append([current_lr])
+            train_y.append(val_loss.item())
+
+        # Save final model
+        model_file_name = self.save_model(saved_epoch, saved_z_total, saved_outputs, saved_model, saved_val_mae, saved_mae, saved_rmse)
+        self._logger.info(
+            'Final Val loss {:.4f}, Test MAE loss {:.4f}, Test RMSE loss {:.4f}, '
+            'saving to {}'.format(saved_val_mae, saved_mae, saved_rmse, model_file_name))
 
     def _train(self, base_lr,
                steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, save_model=1,
@@ -320,7 +681,7 @@ class DCRNNSupervisor:
         saved_z_total = None
         saved_val_mae = None
 
-        for epoch_num in range(self._epoch_num, int(epochs / 250)):
+        for epoch_num in range(self._epoch_num, epochs):
 
             self.dcrnn_model = self.dcrnn_model.train()
 
@@ -380,7 +741,7 @@ class DCRNNSupervisor:
 
             if (epoch_num % log_every) == log_every - 1:
                 message = 'Epoch [{}/{}] ({}) train_mae: {:.4f}, train_kld: {:.4f}, val_mae: {:.4f}, lr: {:.6f}, ' \
-                          '{:.1f}s'.format(epoch_num, float(epochs / 250), batches_seen,
+                          '{:.1f}s'.format(epoch_num, epochs, batches_seen,
                                            np.mean(mae_losses), np.mean(kld_losses), val_loss, lr_scheduler.get_lr()[0],
                                            (end_time - start_time))
                 self._logger.info(message)
@@ -388,7 +749,7 @@ class DCRNNSupervisor:
             if (epoch_num % test_every_n_epochs) == test_every_n_epochs - 1:
                 test_mae_loss, test_rmse_loss, test_outputs = self.evaluate(dataset='test', batches_seen=batches_seen, z_mean_all=self.z_mean_all, z_var_temp_all=self.z_var_temp_all)
                 message = 'Epoch [{}/{}] ({}) test_mae: {:.4f}, test_rmse: {:.4f}, lr: {:.6f}, ' \
-                          '{:.1f}s'.format(epoch_num, float(epochs / 250), batches_seen,
+                          '{:.1f}s'.format(epoch_num, epochs, batches_seen,
                                            test_mae_loss, test_rmse_loss, lr_scheduler.get_lr()[0],
                                            (end_time - start_time))
                 self._logger.info(message)
@@ -413,7 +774,7 @@ class DCRNNSupervisor:
                 wait += 1
                 if wait == patience:
                     model_file_name = self.save_model(saved_epoch, saved_z_total, saved_outputs, saved_model, saved_val_mae, saved_mae, saved_rmse)
-
+                    self.test_mae = saved_mae
                     self._logger.info(
                         'Final Val loss {:.4f}, Test MAE loss {:.4f}, Test RMSE loss {:.4f}, '
                         'saving to {}'.format(saved_val_mae, saved_mae, saved_rmse, model_file_name))
@@ -480,6 +841,7 @@ class DCRNNSupervisor:
 
         return mae_metric(y_predicted, y_true), rmse_metric(y_predicted, y_true)
 
-
+    def get_test_mae(self):
+        return self.test_mae
 
 
