@@ -645,14 +645,22 @@ class DCRNNSupervisor:
                         self._logger.warning('Early stopping at epoch: %d' % epoch_num)
                         break
 
+                if epoch_num == epochs-1:
+                    model_file_name = self.save_model(saved_epoch, saved_z_total, saved_outputs, saved_model, saved_val_mae, saved_mae, saved_rmse)
+                    self.test_mae = saved_mae
+                    self._logger.info(
+                        'Final Val loss {:.4f}, Test MAE loss {:.4f}, Test RMSE loss {:.4f}, '
+                        'saving to {}'.format(saved_val_mae, saved_mae, saved_rmse, model_file_name))
+
             train_x.append([current_lr])
             train_y.append(val_loss.item())
 
-        # Save final model
-        model_file_name = self.save_model(saved_epoch, saved_z_total, saved_outputs, saved_model, saved_val_mae, saved_mae, saved_rmse)
-        self._logger.info(
-            'Final Val loss {:.4f}, Test MAE loss {:.4f}, Test RMSE loss {:.4f}, '
-            'saving to {}'.format(saved_val_mae, saved_mae, saved_rmse, model_file_name))
+        # # Save final model
+        # model_file_name = self.save_model(saved_epoch, saved_z_total, saved_outputs, saved_model, saved_val_mae, saved_mae, saved_rmse)
+        # self.test_mae = saved_mae
+        # self._logger.info(
+        #     'Final Val loss {:.4f}, Test MAE loss {:.4f}, Test RMSE loss {:.4f}, '
+        #     'saving to {}'.format(saved_val_mae, saved_mae, saved_rmse, model_file_name))
 
     def _train(self, base_lr,
                steps, patience=50, epochs=100, lr_decay_ratio=0.1, log_every=1, save_model=1,
@@ -783,7 +791,7 @@ class DCRNNSupervisor:
 
             if epoch_num == epochs-1:
                 model_file_name = self.save_model(saved_epoch, saved_z_total, saved_outputs, saved_model, saved_val_mae, saved_mae, saved_rmse)
-
+                self.test_mae = saved_mae
                 self._logger.info(
                     'Final Val loss {:.4f}, Test MAE loss {:.4f}, Test RMSE loss {:.4f}, '
                     'saving to {}'.format(saved_val_mae, saved_mae, saved_rmse, model_file_name))

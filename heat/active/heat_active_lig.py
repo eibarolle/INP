@@ -966,7 +966,7 @@ for i in range(9): #8
     dcrnn.train()
     print('training data shape:', x_train.shape, y_train.shape, flush=True)
 
-    train_losses, val_losses, test_losses, z_mu, z_logvar = train(500,x_train,y_train,x_val, y_val, x_test, y_test,50, 100) #20000, 5000
+    train_losses, val_losses, test_losses, z_mu, z_logvar = train_botorch(500,x_train,y_train,x_val, y_val, x_test, y_test,50, 100) #20000, 5000
     y_pred_test = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
                       torch.from_numpy(x_test).float())
 #     print("y_pred_shape: ", y_pred_test.shape)
