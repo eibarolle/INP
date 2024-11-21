@@ -7,6 +7,7 @@
 # coding: utf-8
 
 import torch
+import random
 import botorch
 import torch.nn as nn
 print(torch.cuda.device_count())
@@ -397,7 +398,7 @@ class DCRNNModel(nn.Module):
 def random_split_context_target(x,y, n_context):
     """Helper function to split randomly into context and target"""
     ind = np.arange(x.shape[0])
-    mask = int(np.random.choice(ind, size=n_context, replace=False))
+    mask = np.random.choice(ind, size=n_context, replace=False)
     return x[mask], y[mask], np.delete(x, mask, axis=0), np.delete(y, mask, axis=0)
 
 def sample_z(mu, logvar,n=1):
@@ -467,40 +468,7 @@ def train(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=50
     min_loss = float('inf')
     dcrnn.train()
     print(int(n_epochs / 1000))
-    lr_bounds = torch.tensor([[1e-4], [1e-2]], dtype=torch.float64)  
     for t in range(int(n_epochs / 1000)): 
-        gp_train_x = torch.tensor(x_train, dtype=torch.float64)
-        gp_train_y = torch.tensor(y_train, dtype=torch.float64).unsqueeze(-1)
-        x_mean = gp_train_x.mean(0)
-        x_std = gp_train_x.std(0) if gp_train_x.size(0) > 1 else torch.ones_like(x_mean)
-
-        y_mean = gp_train_y.mean()
-        y_std = gp_train_y.std() if gp_train_y.size(0) > 1 else torch.ones_like(y_mean)
-
-        gp_train_x = (gp_train_x - x_mean) / x_std
-        gp_train_y = (gp_train_y - y_mean) / y_std
-        gp = SingleTaskGP(gp_train_x, gp_train_y)
-        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
-        mll.train()
-
-        optimizer_gp = torch.optim.Adam(gp.parameters(), lr=0.1)
-        optimizer_gp.zero_grad()
-        output = gp(gp_train_x)
-        loss = -mll(output, gp_train_y)
-        loss.backward(torch.ones_like(loss))
-        optimizer_gp.step()
-
-        ei = ExpectedImprovement(model=gp, best_f=gp_train_y.max())
-
-        candidate, _ = optimize_acqf(
-            acq_function=ei,
-            bounds=lr_bounds,
-            q=1,  # Suggest one candidate at a time
-            num_restarts=5,
-            raw_samples=20
-        )
-        current_lr = candidate.item()
-        opt = torch.optim.Adam(lr=current_lr)
         opt.zero_grad()
         #Generate data and process
         x_context, y_context, x_target, y_target = random_split_context_target(
@@ -567,97 +535,146 @@ def train(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=50
         
     return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
 
-def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=500, patience=5000):
+def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, run, n_display=500, patience=5000, bo_iter=10):
     train_losses = []
+    mae_losses = []
+    kld_losses = []
     val_losses = []
     test_losses = []
+
+    means_test = []
+    stds_test = []
     min_loss = float('inf')
     wait = 0
+    dcrnn.train()
 
-    surrogate_model = RandomForestRegressor(n_estimators=100)
+    # Set up bounds for learning rate optimization
+    lr_bounds = torch.tensor([[1e-4], [1e-2]], dtype=torch.float64)
+    train_x = []
+    train_y = []
 
-    param_range = np.array([[0.01, 0.5]])  
+    print(f"Bayesian Optimization Iterations: {bo_iter}")
 
+    for bo_itr in range(bo_iter):
+        print(f"BoTorch iteration {bo_itr + 1}/{bo_iter}")
 
-    # Train surrogate model with initial data
-    surrogate_model.fit(x_train, y_train)
+        # First BO iteration: Random initialization
+        if bo_itr == 0:
+            current_lr = random.uniform(lr_bounds[0].item(), lr_bounds[1].item())
+        else:
+            # Train GP model with BoTorch
+            gp_train_x = torch.tensor(train_x, dtype=torch.float64)
+            gp_train_y = torch.tensor(train_y, dtype=torch.float64).unsqueeze(-1)
 
-    for t in range(n_epochs):
-        if t % (n_epochs // 1000) == 0:
-            # Optimize acquisition function using BoTorch
-            def surrogate_model_predict(X):
-                X = X.detach().cpu().numpy()
-                pred = surrogate_model.predict(X)
-                return torch.tensor(pred).float().unsqueeze(-1)
+            x_mean = gp_train_x.mean(0)
+            x_std = gp_train_x.std(0) if gp_train_x.size(0) > 1 else torch.ones_like(x_mean)
 
-            class CustomSurrogate(botorch.models.Model):
-                def __init__(self):
-                    super().__init__()
+            y_mean = gp_train_y.mean()
+            y_std = gp_train_y.std() if gp_train_y.size(0) > 1 else torch.ones_like(y_mean)
 
-                def posterior(self, X):
-                    mean = surrogate_model_predict(X)
-                    variance = torch.ones_like(mean) * 1e-6
-                    return botorch.posteriors.GPyTorchPosterior(mean, variance)
+            # Standardize
+            gp_train_x = (gp_train_x - x_mean) / x_std
+            gp_train_y = (gp_train_y - y_mean) / y_std
 
-            custom_surrogate = CustomSurrogate()
+            gp = SingleTaskGP(gp_train_x, gp_train_y)
+            mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+            mll.train()
 
-            EI = ExpectedImprovement(model=custom_surrogate, best_f=torch.tensor(y_train.min()))
+            optimizer_gp = torch.optim.Adam(gp.parameters(), lr=0.1)
+            optimizer_gp.zero_grad()
+            output = gp(gp_train_x)
+            loss = -mll(output, gp_train_y)
+            loss.backward(torch.ones_like(loss))
+            optimizer_gp.step()
+
+            ei = ExpectedImprovement(model=gp, best_f=gp_train_y.max())
             candidate, _ = optimize_acqf(
-                EI,
-                bounds=torch.tensor(param_range).float(),
+                acq_function=ei,
+                bounds=lr_bounds,
                 q=1,
                 num_restarts=5,
                 raw_samples=20
             )
-            candidate = candidate.detach().numpy().flatten()[0]
+            current_lr = candidate.item()
 
-        # Evaluate model using the new candidate (context-target split ratio)
-        opt.zero_grad()
+        # Update optimizer with the suggested learning rate
+        opt = torch.optim.Adam(dcrnn.parameters(), lr=current_lr)
 
-        x_context, y_context, x_target, y_target = random_split_context_target(x_train, y_train, candidate)
-        x_c = torch.from_numpy(x_context).float().to(device)
-        y_c = torch.from_numpy(y_context).float().to(device)
-        x_t = torch.from_numpy(x_target).float().to(device)
-        y_t = torch.from_numpy(y_target).float().to(device)
+        # Adjust the number of epochs per BO iteration
+        bo_epochs = int(n_epochs / bo_iter)
+        print(f"Training for {bo_epochs} epochs with learning rate {current_lr:.6f}")
 
-        x_ct = torch.cat([x_c, x_t], dim=0)
-        y_ct = torch.cat([y_c, y_t], dim=0)
+        for t in range(bo_epochs):
+            opt.zero_grad()
 
-        y_pred = dcrnn(x_t, x_c, y_c, x_ct, y_ct)
-        train_loss = MAE(y_pred, y_t) + dcrnn.KLD_gaussian()
-        train_loss.backward()
-        torch.nn.utils.clip_grad_norm_(dcrnn.parameters(), 5)
-        opt.step()
+            # Generate data and process
+            x_context, y_context, x_target, y_target = random_split_context_target(
+                x_train, y_train, int(len(y_train) * 0.2)
+            )
 
-        # Validation and test loss
-        y_val_pred = test(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float(), torch.from_numpy(x_val).float())
-        val_loss = MAE(torch.from_numpy(y_val_pred).float(), torch.from_numpy(y_val).float())
-        y_test_pred = test(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float(), torch.from_numpy(x_test).float())
-        test_loss = MAE(torch.from_numpy(y_test_pred).float(), torch.from_numpy(y_test).float())
+            x_c = torch.from_numpy(x_context).float().to(device)
+            x_c = x_c.view(run + 1, -1)
+            x_t = torch.from_numpy(x_target).float().to(device)
+            y_c = torch.from_numpy(y_context).float().to(device)
+            y_t = torch.from_numpy(y_target).float().to(device)
+            # y_c = y_c.reshape(1, *y_c.shape)
+            print(x_c)
+            print(x_t)
+            x_ct = torch.cat([x_c, x_t], dim=0).float().to(device)
+            y_ct = torch.cat([y_c, y_t], dim=0).float().to(device)
 
-        if t % n_display == 0:
-            print(f'Train Loss: {train_loss.item():.4f}, MAE: {MAE(y_pred, y_t).item():.4f}, KLD: {dcrnn.KLD_gaussian().item():.4f}, Val Loss: {val_loss.item():.4f}, Test Loss: {test_loss.item():.4f}')
+            y_pred = dcrnn(x_t, x_c, y_c, x_ct, y_ct)
 
-            now = datetime.now()
-            current_time = now.strftime("%H:%M:%S")
-            print("Current Time =", current_time, flush=True)
+            # Compute losses
+            train_loss = MAE(y_pred, y_t) + dcrnn.KLD_gaussian()
+            mae_loss = MAE(y_pred, y_t)
+            kld_loss = dcrnn.KLD_gaussian()
 
-        # Append losses for analysis
-        if t % (n_display // 10) == 0:
-            train_losses.append(train_loss.item())
-            val_losses.append(val_loss.item())
-            test_losses.append(test_loss.item())
+            train_loss.backward()
+            torch.nn.utils.clip_grad_norm_(dcrnn.parameters(), 5)
+            opt.step()
 
-        # Early Stopping
-        if val_loss < min_loss:
-            wait = 0
-            min_loss = val_loss
-            print(f'Validation loss improved to {min_loss:.4f} at epoch {t}.')
-        elif val_loss >= min_loss:
-            wait += 1
-            if wait == patience:
-                print(f'Early stopping at epoch {t}.')
-                return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+            # Validation loss
+            y_val_pred = test(
+                torch.from_numpy(x_train).float(),
+                torch.from_numpy(y_train).float(),
+                torch.from_numpy(x_val).float()
+            )
+            val_loss = MAE(torch.from_numpy(y_val_pred).float(), torch.from_numpy(y_val).float())
+
+            # Test loss
+            y_test_pred = test(
+                torch.from_numpy(x_train).float(),
+                torch.from_numpy(y_train).float(),
+                torch.from_numpy(x_test).float()
+            )
+            test_loss = MAE(torch.from_numpy(y_test_pred).float(), torch.from_numpy(y_test).float())
+
+            # Logging
+            if t % n_display == 0:
+                print('train loss:', train_loss.item(), 'mae:', mae_loss.item(), 'kld:', kld_loss.item(), flush=True)
+                print('val loss:', val_loss.item(), 'test loss:', test_loss.item(), flush=True)
+
+            if t % (n_display / 10) == 0:
+                train_losses.append(train_loss.item())
+                val_losses.append(val_loss.item())
+                test_losses.append(test_loss.item())
+                mae_losses.append(mae_loss.item())
+                kld_losses.append(kld_loss.item())
+
+            # Early stopping
+            if val_loss < min_loss:
+                wait = 0
+                min_loss = val_loss
+            elif val_loss >= min_loss:
+                wait += 1
+                if wait == patience:
+                    print('Early stopping at epoch: %d' % t)
+                    return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+
+        # Log the results for BO
+        train_x.append([current_lr])
+        train_y.append(val_loss.item())
 
     return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
 
@@ -690,220 +707,6 @@ opt = torch.optim.Adam(dcrnn.parameters(), 1e-3) #1e-3
 pytorch_total_params = sum(p.numel() for p in dcrnn.parameters() if p.requires_grad)
 print(pytorch_total_params)
 
-
-# Bayesian optimization setup
-# def bayesian_optimization(model, train_x, train_y, bounds, n_iters=10):
-#     # Ensure training data is on the correct device
-#     train_x = train_x.to(device)
-#     train_y = train_y.to(device)
-
-#     for iteration in range(n_iters):
-#         # Create a BoTorch GP model
-#         gp = SingleTaskGP(train_x, train_y)
-        
-#         # Fit the GP model manually using Maximum Likelihood Estimation (MLE)
-#         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
-#         mll.train()  # Set model to training mode
-
-#         # Use Adam optimizer for the model parameters
-#         optimizer = Adam(gp.parameters(), lr=0.1)
-
-#         # Optimize the model hyperparameters
-#         training_iterations = 100  # Number of iterations to optimize
-#         for _ in range(training_iterations):
-#             optimizer.zero_grad()  # Zero the gradients
-#             output = gp(train_x)  # Forward pass through the model
-#             loss = -mll(output, train_y)  # Compute the negative log likelihood loss
-#             loss = loss.mean()  # Ensure the loss is a scalar
-#             loss.backward()  # Backpropagate to compute gradients
-#             optimizer.step()  # Update model parameters
-
-#         # Switch to evaluation mode after training
-#         gp.eval()
-#         gp.likelihood.eval()
-
-#         # Define acquisition function (Expected Improvement)
-#         ei = ExpectedImprovement(model=gp, best_f=train_y.max())
-
-#         # Optimize acquisition function
-#         candidate, _ = optimize_acqf(
-#             acq_function=ei,
-#             bounds=torch.tensor(bounds, dtype=torch.float32, device=device),
-#             q=1,  # Number of candidates
-#             num_restarts=5,  # Number of random initializations
-#             raw_samples=20,  # Number of raw samples
-#         )
-        
-#         # Evaluate candidate
-#         candidate_y = model(candidate)
-
-#         # Add candidate to training data
-#         train_x = torch.cat([train_x, candidate])
-#         train_y = torch.cat([train_y, candidate_y])
-    
-#     return train_x, train_y
-
-def bayesian_optimization(model, train_x, train_y, bounds, n_iters=10, batch_size=5):
-    # Convert to double precision and move to the correct device
-    train_x = torch.from_numpy(train_x).double().to(device)
-    train_y = torch.from_numpy(train_y).double().to(device)
-    bounds = torch.tensor(bounds, dtype=torch.double, device=device)
-    
-    for iteration in range(n_iters):
-        # Create a BoTorch GP model
-        gp = SingleTaskGP(train_x, train_y)
-        
-        # Fit the GP model manually using Maximum Likelihood Estimation (MLE)
-        mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
-        mll.train()  # Set model to training mode
-
-        # Use Adam optimizer for the model parameters
-        optimizer = Adam(gp.parameters(), lr=0.1)
-
-        # Optimize the model hyperparameters
-        training_iterations = 100  # Number of iterations to optimize
-        for _ in range(training_iterations):
-            optimizer.zero_grad()  # Zero the gradients
-            output = gp(train_x)  # Forward pass through the model
-            loss = -mll(output, train_y)  # Compute the negative log likelihood loss
-            loss = loss.mean()  # Ensure the loss is a scalar
-            loss.backward()  # Backpropagate to compute gradients
-            optimizer.step()  # Update model parameters
-
-        # Switch to evaluation mode after training
-        gp.eval()
-        gp.likelihood.eval()
-
-        # Define acquisition function (Expected Improvement)
-        ei = ExpectedImprovement(model=gp, best_f=train_y.max())
-
-        # Optimize acquisition function
-        candidate, _ = optimize_acqf(
-            acq_function=ei,
-            bounds=bounds,
-            q=1,  # Number of candidates
-            num_restarts=5,  # Number of random initializations
-            raw_samples=20,  # Number of raw samples
-        )
-
-        # Evaluate candidate
-        candidate_y = model(candidate)
-        
-        # Convert candidate and candidate_y to numpy arrays
-        candidate = candidate.cpu().numpy()
-        candidate_y = candidate_y.cpu().numpy()
-
-        # Calculate reward for the candidate
-        reward = calculate_score(train_x.cpu().numpy(), train_y.cpu().numpy(), candidate)
-
-        # Add candidate to training data based on reward
-        if reward < 0:  # Assuming we want to minimize the score
-            train_x = torch.cat([train_x, torch.from_numpy(candidate).double().to(device)])
-            train_y = torch.cat([train_y, torch.from_numpy(candidate_y).double().to(device)])
-    
-    return train_x.cpu().numpy(), train_y.cpu().numpy()
-
-
-# In[44]:
-
-
-# # takes in x and y data, generate two sets, one is x and y in batch, the other is x and y removed from all data
-# # returns selected x, selected y, rest of dataset x, rest of dataset y
-# def generate_batch(x,y, batch_size):
-#     """Helper function to split randomly into context and target"""
-#     ind = np.arange(x.shape[0])
-#     mask = np.random.choice(ind, size=batch_size, replace=False)
-#     return x[mask], y[mask], np.delete(x, mask, axis=0), np.delete(y, mask, axis=0)
-
-
-# # In[86]:
-
-
-# # initialize search_data_x to the dataset with x_init removed
-# def calculate_score(x_train, y_train, x_search):
-#     x_train = torch.from_numpy(x_train).float()
-#     y_train = torch.from_numpy(y_train).float()
-#     x_search = torch.from_numpy(x_search).float()
-#     dcrnn.eval()
-
-#     # query z_mu, z_var of the current training data
-#     with torch.no_grad():
-#         z_mu, z_logvar = data_to_z_params(x_train.to(device),y_train.to(device))
-        
-#         output_list = []
-#         for theta in x_search:
-#             output = dcrnn.decoder(theta, z_mu, z_logvar)
-# #             print("shape of output in calculating score: ", output.shape)
-#             output_list.append(output)
-#         outputs = torch.stack(output_list, dim=0)
-
-#         y_search = outputs.squeeze(2)
-# #         print("shape of y_search: ", y_search.shape)
-# #         print("shape of y_train: ", y_train.shape)
-# #         print("shape of x_train: ", x_train.shape)
-# #         print("shape of x_search: ", x_search.shape)
-
-#         x_search_all = torch.cat([x_train.to(device),x_search.to(device)],dim=0)
-#         y_search_all = torch.cat([y_train.to(device),y_search],dim=0)
-        
-# #         print("shape of y_search_all: ", y_search_all.shape)
-# #         print("shape of x_search_all: ", x_search_all.shape)
-
-#         # generate z_mu_search, z_var_search
-#         z_mu_search, z_logvar_search = data_to_z_params(x_search_all.to(device),y_search_all.to(device), calc_score = True)
-
-#         # calculate and save kld
-#         mu_q, var_q, mu_p, var_p = z_mu_search,  0.1+ 0.9*torch.sigmoid(z_logvar_search), z_mu, 0.1+ 0.9*torch.sigmoid(z_logvar)
-
-#         std_q = torch.sqrt(var_q)
-#         std_p = torch.sqrt(var_p)
-
-#         p = torch.distributions.Normal(mu_p, std_p)
-#         q = torch.distributions.Normal(mu_q, std_q)
-#         score = torch.distributions.kl_divergence(q, p).sum()
-
-
-#     return score
-
-def generate_batch(x, y, batch_size):
-    """Helper function to split randomly into context and target"""
-    ind = np.arange(x.shape[0])
-    mask = np.random.choice(ind, size=batch_size, replace=False)
-    return x[mask], y[mask], np.delete(x, mask, axis=0), np.delete(y, mask, axis=0)
-
-# def calculate_score(x_train, y_train, x_search):
-#     x_train = torch.from_numpy(x_train).double().to(device)
-#     y_train = torch.from_numpy(y_train).double().to(device)
-#     x_search = torch.from_numpy(x_search).double().to(device)
-#     dcrnn.eval()
-
-#     # query z_mu, z_var of the current training data
-#     with torch.no_grad():
-#         z_mu, z_logvar = data_to_z_params(x_train, y_train)
-        
-#         output_list = []
-#         for theta in x_search:
-#             output = dcrnn.decoder(theta, z_mu, z_logvar)
-#             output_list.append(output)
-#         outputs = torch.stack(output_list, dim=0)
-
-#         y_search = outputs.squeeze(2)
-
-#         x_search_all = torch.cat([x_train, x_search], dim=0)
-#         y_search_all = torch.cat([y_train, y_search], dim=0)
-
-#         # generate z_mu_search, z_var_search
-#         z_mu_search, z_logvar_search = data_to_z_params(x_search_all, y_search_all, calc_score=True)
-
-#         # calculate and save KLD
-#         mu_q, var_q, mu_p, var_p = z_mu_search, 0.1 + 0.9 * torch.sigmoid(z_logvar_search), z_mu, 0.1 + 0.9 * torch.sigmoid(z_logvar)
-#         std_q = torch.sqrt(var_q)
-#         std_p = torch.sqrt(var_p)
-#         p = torch.distributions.Normal(mu_p, std_p)
-#         q = torch.distributions.Normal(mu_q, std_q)
-#         score = kl_divergence(q, p).sum()
-
-#     return score.item()
 
 def calculate_score(x_train, y_train, x_search):
     x_train = torch.from_numpy(x_train).float()
@@ -954,19 +757,19 @@ def calculate_score(x_train, y_train, x_search):
 
 
 x_train = np.load('x_train_initial.npy')[:5]
+print(x_train)
 y_train = np.load('y_train_initial.npy')[:5]
 search_data_x = np.load('search_data_x_initial.npy')
 search_data_y = np.load('search_data_y_initial.npy')
 bounds = torch.tensor([[0.], [1.]], device=device)
-#x_opt, y_opt = bayesian_optimization(dcrnn, x_train, y_train, bounds)
-#print('x_opt:', torch.from_numpy(x_opt).float())
-#print('y_opt:', torch.from_numpy(x_opt).float())
+initial_scenarios = len(search_data_x)
+data_percentage = []
 
 for i in range(9): #8
     dcrnn.train()
     print('training data shape:', x_train.shape, y_train.shape, flush=True)
 
-    train_losses, val_losses, test_losses, z_mu, z_logvar = train_botorch(500,x_train,y_train,x_val, y_val, x_test, y_test,50, 100) #20000, 5000
+    train_losses, val_losses, test_losses, z_mu, z_logvar = train_botorch(20,x_train,y_train,x_val, y_val, x_test, y_test, i, 50, 100) #20000, 5000
     y_pred_test = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
                       torch.from_numpy(x_test).float())
 #     print("y_pred_shape: ", y_pred_test.shape)
@@ -1005,18 +808,13 @@ for i in range(9): #8
     
     search_data_x = [e for i, e in enumerate(search_data_x) if i not in index_list[selected_ind]]
     search_data_y = [e for i, e in enumerate(search_data_y) if i not in index_list[selected_ind]]
-    print('remained scenarios:', len(search_data_x), flush=True) 
+    remaining_scenarios = len(search_data_x)
+    data_used = (1 - remaining_scenarios / initial_scenarios) * 100
+    data_percentage.append(data_used)
+
+    print(f'Remaining scenarios: {remaining_scenarios}, Data used: {data_used:.2f}%', flush=True)
     max_reward = max(reward_list)
     all_rewards.append(max_reward)
-
-    # # Define acquisition function (e.g., UCB without GP)
-    #     # This acquisition function optimizes a given reward directly without a GP model
-    #     def acquisition_function(X):
-    #         return -torch.tensor(max_reward)
-
-    #     # Optimize acquisition function (e.g., choose next data point)
-    #     acq_func = UpperConfidenceBound(acquisition_function, beta=0.1)
-    #     candidate, _ = optimize_acqf(acq_func, bounds=bounds, q=1, num_restarts=5, raw_samples=20)   
 
 
 y_pred_all_arr = np.stack(y_pred_all_list,0)
@@ -1049,6 +847,22 @@ plt.xlabel('Iteration')
 plt.ylabel('Max Reward')
 plt.title('Max Reward over Iterations')
 plt.savefig('max_reward_over_iterations.png')
+plt.close()
+
+plt.figure()
+plt.plot(data_percentage, test_mae_list, marker='o')
+plt.xlabel('Percentage of Data')
+plt.ylabel('Test MAE')
+plt.title('Test MAE over Percentage of Data')
+plt.savefig('test_mae_over_percentage_data.png')
+plt.close()
+
+plt.figure()
+plt.plot(data_percentage, all_rewards, marker='o')
+plt.xlabel('Percentage of Data')
+plt.ylabel('Max Reward')
+plt.title('Max Reward over Percentage of Data')
+plt.savefig('max_reward_over_percentage_data.png')
 plt.close()
 
 # plt.figure()

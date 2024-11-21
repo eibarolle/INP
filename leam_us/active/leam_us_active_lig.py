@@ -41,8 +41,11 @@ def main(args):
 
         all_rewards = []
         test_mae_list = []
+        data_percentage = []
         train_x = []
         train_y = []
+
+        initial_scenarios = len(search_data_x)
 
         for itr in range(max_itr):
             supervisor.iteration = itr
@@ -87,7 +90,11 @@ def main(args):
             search_data_x = [e for i, e in enumerate(search_data_x) if i not in index_list[selected_ind]]
             search_data_y = [e for i, e in enumerate(search_data_y) if i not in index_list[selected_ind]]
 
-            print('Remaining scenarios:', len(search_data_x))
+            remaining_scenarios = len(search_data_x)
+            data_used = (1 - remaining_scenarios / initial_scenarios) * 100
+            data_percentage.append(data_used)
+
+            print(f'Remaining scenarios: {remaining_scenarios}, Data used: {data_used:.2f}%')
 
         # Save test MAE and rewards across iterations
         np.save('test_mae_list.npy', np.array(test_mae_list))
@@ -109,6 +116,22 @@ def main(args):
         plt.ylabel('Max Reward')
         plt.title('Max Reward over Iterations')
         plt.savefig('max_reward_over_iterations.png')
+        plt.close()
+
+        plt.figure()
+        plt.plot(data_percentage, test_mae_list, marker='o')
+        plt.xlabel('Percentage of Data')
+        plt.ylabel('Test MAE')
+        plt.title('Test MAE over Percentage of Data')
+        plt.savefig('test_mae_over_percentage_data.png')
+        plt.close()
+
+        plt.figure()
+        plt.plot(data_percentage, all_rewards, marker='o')
+        plt.xlabel('Percentage of Data')
+        plt.ylabel('Max Reward')
+        plt.title('Max Reward over Percentage of Data')
+        plt.savefig('max_reward_over_percentage_data.png')
         plt.close()
 
 

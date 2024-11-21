@@ -11,6 +11,7 @@ Original file is located at
 import numpy as np
 from numpy.random import binomial
 import torch
+import random
 import matplotlib.pyplot as plt
 # %matplotlib inline
 from sklearn.gaussian_process import GaussianProcessRegressor
@@ -20,10 +21,17 @@ from sklearn.gaussian_process.kernels import (RBF, Matern, RationalQuadratic,
 from botorch.models.model import Model
 from botorch.acquisition import UpperConfidenceBound
 from botorch.optim import optimize_acqf
+from botorch.models import SingleTaskGP
+from botorch.acquisition import ExpectedImprovement
+from gpytorch.mlls import ExactMarginalLogLikelihood
+from torch.optim.lr_scheduler import MultiStepLR
+from torch.nn.utils import clip_grad_norm_
+
 import torch.nn as nn
 from torch.distributions import Normal
 from sklearn import preprocessing
 from scipy.stats import multivariate_normal
+
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 #device = torch.device("cpu")
@@ -326,77 +334,216 @@ def test(x_train, y_train, x_test):
     
     return np.concatenate(output_list)
 
-def train(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=500, patience = 5000): #7000, 1000
+# def train(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_display=500, patience = 5000): #7000, 1000
+#     train_losses = []
+#     # mae_losses = []
+#     # kld_losses = []
+#     val_losses = []
+#     test_losses = []
+
+#     means_test = []
+#     stds_test = []
+#     N = 100000 #population
+#     min_loss = 0. # for early stopping
+#     wait = 0
+#     min_loss = float('inf')
+#     print(int(n_epochs / 1000))
+#     for t in range(int(n_epochs / 1000)): 
+#         opt.zero_grad()
+#         #Generate data and process
+#         x_context, y_context, x_target, y_target = random_split_context_target(
+#                                 x_train, y_train, int(len(y_train)*0.1)) #0.25, 0.5, 0.05,0.015, 0.01
+#         # print(x_context.shape, y_context.shape, x_target.shape, y_target.shape)    
+
+#         x_c = torch.from_numpy(x_context).float().to(device)
+#         x_t = torch.from_numpy(x_target).float().to(device)
+#         y_c = torch.from_numpy(y_context).float().to(device)
+#         y_t = torch.from_numpy(y_target).float().to(device)
+
+#         x_ct = torch.cat([x_c, x_t], dim=0).float().to(device)
+#         y_ct = torch.cat([y_c, y_t], dim=0).float().to(device)
+
+#         y_pred = dcrnn(x_t, x_c, y_c, x_ct, y_ct)
+
+#         train_loss = N * MAE(y_pred, y_t)/100 + dcrnn.KLD_gaussian()
+#         mae_loss = N * MAE(y_pred, y_t)/100
+#         kld_loss = dcrnn.KLD_gaussian()
+        
+#         train_loss.backward()
+#         torch.nn.utils.clip_grad_norm_(dcrnn.parameters(), 5) #10
+#         opt.step()
+        
+#         #val loss
+#         y_val_pred = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
+#                       torch.from_numpy(x_val).float())
+#         val_loss = N * MAE(torch.from_numpy(y_val_pred).float(),torch.from_numpy(y_val).float())/100
+#         #test loss
+#         y_test_pred = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
+#                       torch.from_numpy(x_test).float())
+#         test_loss = N * MAE(torch.from_numpy(y_test_pred).float(),torch.from_numpy(y_test).float())/100
+
+#         if t % n_display ==0:
+#             print('train loss:', train_loss.item(), 'mae:', mae_loss.item(), 'kld:', kld_loss.item())
+#             print('val loss:', val_loss.item(), 'test loss:', test_loss.item())
+
+#         if t % (n_display/10) ==0:
+#             train_losses.append(train_loss.item())
+#             val_losses.append(val_loss.item())
+#             test_losses.append(test_loss.item())
+#             # mae_losses.append(mae_loss.item())
+#             # kld_losses.append(kld_loss.item())
+
+#         #early stopping
+#         if val_loss < min_loss:
+#             wait = 0
+#             min_loss = val_loss
+            
+#         elif val_loss >= min_loss:
+#             wait += 1
+#             if wait == patience:
+#                 print('Early stopping at epoch: %d' % t)
+#                 return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+        
+#     return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+
+def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, 
+          n_display=500, patience=5000, bo_iter=10,):
     train_losses = []
-    # mae_losses = []
-    # kld_losses = []
     val_losses = []
     test_losses = []
-
-    means_test = []
-    stds_test = []
-    N = 100000 #population
-    min_loss = 0. # for early stopping
-    wait = 0
+    lr_bounds = torch.tensor([[1e-4], [1e-2]], dtype=torch.float64)  
+    N = 100000  # population
     min_loss = float('inf')
-    print(int(n_epochs / 1000))
-    for t in range(int(n_epochs / 1000)): 
-        opt.zero_grad()
-        #Generate data and process
-        x_context, y_context, x_target, y_target = random_split_context_target(
-                                x_train, y_train, int(len(y_train)*0.1)) #0.25, 0.5, 0.05,0.015, 0.01
-        # print(x_context.shape, y_context.shape, x_target.shape, y_target.shape)    
+    wait = 0
 
-        x_c = torch.from_numpy(x_context).float().to(device)
-        x_t = torch.from_numpy(x_target).float().to(device)
-        y_c = torch.from_numpy(y_context).float().to(device)
-        y_t = torch.from_numpy(y_target).float().to(device)
+    # Data for BoTorch
+    train_x = []
+    train_y = []
+    lr_bounds_tensor = torch.tensor(lr_bounds, dtype=torch.float64).unsqueeze(1)
 
-        x_ct = torch.cat([x_c, x_t], dim=0).float().to(device)
-        y_ct = torch.cat([y_c, y_t], dim=0).float().to(device)
-
-        y_pred = dcrnn(x_t, x_c, y_c, x_ct, y_ct)
-
-        train_loss = N * MAE(y_pred, y_t)/100 + dcrnn.KLD_gaussian()
-        mae_loss = N * MAE(y_pred, y_t)/100
-        kld_loss = dcrnn.KLD_gaussian()
+    for bo_itr in range(bo_iter):
+        print(f"BoTorch Iteration {bo_itr + 1}/{bo_iter}")
         
-        train_loss.backward()
-        torch.nn.utils.clip_grad_norm_(dcrnn.parameters(), 5) #10
-        opt.step()
+        # Initialize or update learning rate
+        if bo_itr == 0:
+            current_lr = random.uniform(lr_bounds[0].item(), lr_bounds[1].item())
+        else:
+            # Train GP model with BoTorch
+            gp_train_x = torch.tensor(train_x, dtype=torch.float64)
+            gp_train_y = torch.tensor(train_y, dtype=torch.float64).unsqueeze(-1)
+
+            x_mean = gp_train_x.mean(0)
+            x_std = gp_train_x.std(0) if gp_train_x.size(0) > 1 else torch.ones_like(x_mean)
+
+            y_mean = gp_train_y.mean()
+            y_std = gp_train_y.std() if gp_train_y.size(0) > 1 else torch.ones_like(y_mean)
+
+            # Standardize
+            gp_train_x = (gp_train_x - x_mean) / x_std
+            gp_train_y = (gp_train_y - y_mean) / y_std
+
+            gp = SingleTaskGP(gp_train_x, gp_train_y)
+            mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+            mll.train()
+
+            optimizer_gp = torch.optim.Adam(gp.parameters(), lr=0.1)
+            optimizer_gp.zero_grad()
+            output = gp(gp_train_x)
+            loss = -mll(output, gp_train_y)
+            loss.backward(torch.ones_like(loss))
+            optimizer_gp.step()
+
+            ei = ExpectedImprovement(model=gp, best_f=gp_train_y.max())
+            candidate, _ = optimize_acqf(
+                acq_function=ei,
+                bounds=lr_bounds,
+                q=1,
+                num_restarts=5,
+                raw_samples=20
+            )
+            current_lr = candidate.item()
+
+        # Update optimizer with new learning rate
+        if isinstance(current_lr, torch.Tensor):
+            current_lr = current_lr.item()
+        opt = torch.optim.Adam(dcrnn.parameters(), lr=current_lr)
         
-        #val loss
-        y_val_pred = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
-                      torch.from_numpy(x_val).float())
-        val_loss = N * MAE(torch.from_numpy(y_val_pred).float(),torch.from_numpy(y_val).float())/100
-        #test loss
-        y_test_pred = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
-                      torch.from_numpy(x_test).float())
-        test_loss = N * MAE(torch.from_numpy(y_test_pred).float(),torch.from_numpy(y_test).float())/100
+        bo_epochs = int(n_epochs / bo_iter)
+        print(f"Training for {bo_epochs} epochs with learning rate {current_lr:.6f}")
 
-        if t % n_display ==0:
-            print('train loss:', train_loss.item(), 'mae:', mae_loss.item(), 'kld:', kld_loss.item())
-            print('val loss:', val_loss.item(), 'test loss:', test_loss.item())
+        # Epoch loop
+        for t in range(bo_epochs):
+            opt.zero_grad()
 
-        if t % (n_display/10) ==0:
+            # Generate and process data
+            x_context, y_context, x_target, y_target = random_split_context_target(
+                x_train, y_train, int(len(y_train) * 0.1)
+            )
+            x_c = torch.from_numpy(x_context).float().to(device)
+            y_c = torch.from_numpy(y_context).float().to(device)
+            x_t = torch.from_numpy(x_target).float().to(device)
+            y_t = torch.from_numpy(y_target).float().to(device)
+
+            x_ct = torch.cat([x_c, x_t], dim=0).float().to(device)
+            y_ct = torch.cat([y_c, y_t], dim=0).float().to(device)
+
+            # Forward pass
+            y_pred = dcrnn(x_t, x_c, y_c, x_ct, y_ct)
+            train_loss = N * MAE(y_pred, y_t) / 100 + dcrnn.KLD_gaussian()
+            mae_loss = N * MAE(y_pred, y_t) / 100
+            kld_loss = dcrnn.KLD_gaussian()
+
+            train_loss.backward()
+            torch.nn.utils.clip_grad_norm_(dcrnn.parameters(), 5)
+            opt.step()
+
+            # Validation
+            y_val_pred = test(
+                torch.from_numpy(x_train).float(),
+                torch.from_numpy(y_train).float(),
+                torch.from_numpy(x_val).float(),
+            )
+            val_loss = N * MAE(
+                torch.from_numpy(y_val_pred).float(),
+                torch.from_numpy(y_val).float()
+            ) / 100
+
+            # Test
+            y_test_pred = test(
+                torch.from_numpy(x_train).float(),
+                torch.from_numpy(y_train).float(),
+                torch.from_numpy(x_test).float(),
+            )
+            test_loss = N * MAE(
+                torch.from_numpy(y_test_pred).float(),
+                torch.from_numpy(y_test).float()
+            ) / 100
+
+            if t % n_display == 0:
+                print(f"Epoch {t + 1}/{int(n_epochs / bo_iter)} - "
+                      f"Train Loss: {train_loss.item()}, MAE: {mae_loss.item()}, KLD: {kld_loss.item()}, "
+                      f"Val Loss: {val_loss.item()}, Test Loss: {test_loss.item()}")
+
             train_losses.append(train_loss.item())
             val_losses.append(val_loss.item())
             test_losses.append(test_loss.item())
-            # mae_losses.append(mae_loss.item())
-            # kld_losses.append(kld_loss.item())
 
-        #early stopping
-        if val_loss < min_loss:
-            wait = 0
-            min_loss = val_loss
-            
-        elif val_loss >= min_loss:
-            wait += 1
-            if wait == patience:
-                print('Early stopping at epoch: %d' % t)
-                return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
-        
+            # Early stopping
+            if val_loss < min_loss:
+                min_loss = val_loss
+                wait = 0
+            else:
+                wait += 1
+                if wait == patience:
+                    print(f"Early stopping at BoTorch iteration: {bo_itr}, epoch: {t}")
+                    return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+
+        # Append results for BoTorch
+        train_x.append([current_lr])
+        train_y.append(val_loss.item())
+
     return train_losses, val_losses, test_losses, dcrnn.z_mu_all, dcrnn.z_logvar_all
+
 
 def select_data(x_train, y_train, beta_epsilon_all, yall_set, score_array, selected_mask):
 
@@ -558,6 +705,8 @@ maemetrix_allset = []
 mae_testset = []
 score_set = []
 mask_set = []
+total_data_size = len(beta_epsilon_all)
+data_percentage = []
 
 for seed in range(1,3): #3
     np.random.seed(seed)
@@ -580,8 +729,11 @@ for seed in range(1,3): #3
         # print('selected_mask:', selected_mask)
         print('training data shape:', x_train.shape, y_train.shape)
         mask_list.append(np.copy(selected_mask))
+        current_percentage = np.sum(selected_mask) / total_data_size * 100
+        if (seed == 2):
+            data_percentage.append(current_percentage)
 
-        train_losses, val_losses, test_losses, z_mu, z_logvar = train(20000,x_train,y_train,x_val, y_val, x_test, y_test,500, 1500) #20000, 5000
+        train_losses, val_losses, test_losses, z_mu, z_logvar = train_botorch(20,x_train,y_train,x_val, y_val, x_test, y_test,500, 1500) #20000, 5000
         y_pred_test = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
                           torch.from_numpy(x_test).float())
         y_pred_test_list.append(y_pred_test)
@@ -662,3 +814,19 @@ plt.title('All MAE over Iterations')
 plt.savefig('all_mae_over_iterations.png')
 plt.close()
 print('training finished, dicts saved')
+
+plt.figure()
+plt.plot(data_percentage, test_mae_list, marker='o')
+plt.xlabel('Percentage of Data')
+plt.ylabel('Test MAE')
+plt.title('Test MAE over Percentage of Data')
+plt.savefig('test_mae_over_percentage_data.png')
+plt.close()
+
+plt.figure()
+plt.plot(data_percentage, all_mae_list, marker='o')
+plt.xlabel('Percentage of Data')
+plt.ylabel('All MAE')
+plt.title('All MAE over Percentage of Data')
+plt.savefig('all_mae_over_percentage_data.png')
+plt.close()
