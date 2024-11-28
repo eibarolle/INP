@@ -97,8 +97,8 @@ def main(args):
             print(f'Remaining scenarios: {remaining_scenarios}, Data used: {data_used:.2f}%')
 
         # Save test MAE and rewards across iterations
-        np.save('test_mae_list.npy', np.array(test_mae_list))
-        np.save('all_rewards.npy', np.array(all_rewards))
+        np.save('data/results/test_mae_list.npy', np.array(test_mae_list))
+        np.save('data/results/all_rewards.npy', np.array(all_rewards))
 
         # Plot Test MAE over iterations
         plt.figure()
@@ -106,7 +106,7 @@ def main(args):
         plt.xlabel('Iteration')
         plt.ylabel('Test MAE')
         plt.title('Test MAE over Iterations')
-        plt.savefig('test_mae_over_iterations.png')
+        plt.savefig('graphs/test_mae_over_iterations.png')
         plt.close()
 
         # Plot Maximum Reward over iterations
@@ -115,7 +115,7 @@ def main(args):
         plt.xlabel('Iteration')
         plt.ylabel('Max Reward')
         plt.title('Max Reward over Iterations')
-        plt.savefig('max_reward_over_iterations.png')
+        plt.savefig('graphs/max_reward_over_iterations.png')
         plt.close()
 
         plt.figure()
@@ -123,7 +123,7 @@ def main(args):
         plt.xlabel('Percentage of Data')
         plt.ylabel('Test MAE')
         plt.title('Test MAE over Percentage of Data')
-        plt.savefig('test_mae_over_percentage_data.png')
+        plt.savefig('graphs/test_mae_over_percentage_data.png')
         plt.close()
 
         plt.figure()
@@ -131,7 +131,7 @@ def main(args):
         plt.xlabel('Percentage of Data')
         plt.ylabel('Max Reward')
         plt.title('Max Reward over Percentage of Data')
-        plt.savefig('max_reward_over_percentage_data.png')
+        plt.savefig('graphs/max_reward_over_percentage_data.png')
         plt.close()
 
 

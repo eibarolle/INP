@@ -634,7 +634,7 @@ def mae_plot(mae, selected_mask,i,j):
     fig.colorbar(c, ax=ax)
     ax.set_xlabel('Beta')
     ax.set_ylabel('Epsilon')
-    plt.savefig('mae_plot_seed%d_itr%d.pdf' % (i,j))
+    plt.savefig('seed%d/mae_plots/mae_plot_seed%d_itr%d.pdf' % (i,i,j))
 
 def score_plot(score, selected_mask,i,j):
     epsilon, beta  = np.meshgrid(np.linspace(0.25, 0.7, 10), np.linspace(1.1, 4.1, 31))
@@ -655,7 +655,7 @@ def score_plot(score, selected_mask,i,j):
     fig.colorbar(c, ax=ax)
     ax.set_xlabel('Beta')
     ax.set_ylabel('Epsilon')
-    plt.savefig('score_plot_seed%d_itr%d.pdf' % (i,j))
+    plt.savefig('seed%d/score_plots/score_plot_seed%d_itr%d.pdf' % (i,i,j))
 
 def MAE_MX(y_pred, y_test):
     N = 100000
@@ -785,25 +785,25 @@ mae_testarr = np.stack(mae_testset,0)
 score_arr = np.stack(score_set,0)
 mask_arr = np.stack(mask_set,0)
 
-np.save('mae_testarr.npy',mae_testarr)
-np.save('mae_allarr.npy',mae_allarr)
-np.save('maemetrix_allarr.npy',maemetrix_allarr)
+np.save('data/mae_testarr.npy',mae_testarr)
+np.save('data/mae_allarr.npy',mae_allarr)
+np.save('data/maemetrix_allarr.npy',maemetrix_allarr)
 
-np.save('score_arr.npy',score_arr)
-np.save('mask_arr.npy',mask_arr)
+np.save('data/score_arr.npy',score_arr)
+np.save('data/mask_arr.npy',mask_arr)
 
-np.save('y_pred_all_arr.npy',ypred_allarr)
-np.save('y_pred_test_arr.npy',ypred_testarr)
+np.save('data/y_pred_all_arr.npy',ypred_allarr)
+np.save('data/y_pred_test_arr.npy',ypred_testarr)
 
-np.save('y_all.npy',y_all)
-np.save('y_test.npy',y_test)
+np.save('data/y_all.npy',y_all)
+np.save('data/y_test.npy',y_test)
 
 plt.figure()
 plt.plot(range(len(test_mae_list)), test_mae_list, marker='o')
 plt.xlabel('Iteration')
 plt.ylabel('Test MAE')
 plt.title('Test MAE over Iterations')
-plt.savefig('test_mae_over_iterations.png')
+plt.savefig('graphs/test_mae_over_iterations.png')
 plt.close()
 
 plt.figure()
@@ -811,7 +811,7 @@ plt.plot(range(len(all_mae_list)), all_mae_list, marker='o')
 plt.xlabel('Iteration')
 plt.ylabel('All MAE')
 plt.title('All MAE over Iterations')
-plt.savefig('all_mae_over_iterations.png')
+plt.savefig('graphs/all_mae_over_iterations.png')
 plt.close()
 print('training finished, dicts saved')
 
@@ -820,7 +820,7 @@ plt.plot(data_percentage, test_mae_list, marker='o')
 plt.xlabel('Percentage of Data')
 plt.ylabel('Test MAE')
 plt.title('Test MAE over Percentage of Data')
-plt.savefig('test_mae_over_percentage_data.png')
+plt.savefig('graphs/test_mae_over_percentage_data.png')
 plt.close()
 
 plt.figure()
@@ -828,5 +828,5 @@ plt.plot(data_percentage, all_mae_list, marker='o')
 plt.xlabel('Percentage of Data')
 plt.ylabel('All MAE')
 plt.title('All MAE over Percentage of Data')
-plt.savefig('all_mae_over_percentage_data.png')
+plt.savefig('graphs/all_mae_over_percentage_data.png')
 plt.close()
