@@ -428,7 +428,7 @@ def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test,
         if bo_itr == 0:
             current_lr = random.uniform(lr_bounds[0].item(), lr_bounds[1].item())
         else:
-            # Train GP model with BoTorch
+            # Train GP model
             gp_train_x = torch.tensor(train_x, dtype=torch.float64)
             gp_train_y = torch.tensor(train_y, dtype=torch.float64).unsqueeze(-1)
 
@@ -438,7 +438,7 @@ def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test,
             y_mean = gp_train_y.mean()
             y_std = gp_train_y.std() if gp_train_y.size(0) > 1 else torch.ones_like(y_mean)
 
-            # Standardize
+            # Standardization with BoTorch
             gp_train_x = (gp_train_x - x_mean) / x_std
             gp_train_y = (gp_train_y - y_mean) / y_std
 
@@ -446,6 +446,7 @@ def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test,
             mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
             mll.train()
 
+            # Optimizer
             optimizer_gp = torch.optim.Adam(gp.parameters(), lr=0.1)
             optimizer_gp.zero_grad()
             output = gp(gp_train_x)
@@ -463,7 +464,7 @@ def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test,
             )
             current_lr = candidate.item()
 
-        # Update optimizer with new learning rate
+        # Update optimizer with BoTorch learning rate
         if isinstance(current_lr, torch.Tensor):
             current_lr = current_lr.item()
         opt = torch.optim.Adam(dcrnn.parameters(), lr=current_lr)
@@ -733,7 +734,7 @@ for seed in range(1,3): #3
         if (seed == 2):
             data_percentage.append(current_percentage)
 
-        train_losses, val_losses, test_losses, z_mu, z_logvar = train_botorch(20,x_train,y_train,x_val, y_val, x_test, y_test,500, 1500) #20000, 5000
+        train_losses, val_losses, test_losses, z_mu, z_logvar = train_botorch(20,x_train,y_train,x_val, y_val, x_test, y_test,500, 1500) #Originally 20000, 5000
         y_pred_test = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
                           torch.from_numpy(x_test).float())
         y_pred_test_list.append(y_pred_test)

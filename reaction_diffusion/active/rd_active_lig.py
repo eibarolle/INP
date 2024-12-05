@@ -570,7 +570,7 @@ def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_di
     for bo_itr in range(bo_iter):
         print(f"BoTorch iteration {bo_itr + 1}/{bo_iter}")
 
-        # First BO iteration: Random initialization
+        # First BO iteration switch: Random initialization
         if bo_itr == 0:
             current_lr = random.uniform(lr_bounds[0].item(), lr_bounds[1].item())
         else:
@@ -592,6 +592,7 @@ def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_di
             mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
             mll.train()
 
+            # Optimizer
             optimizer_gp = torch.optim.Adam(gp.parameters(), lr=0.1)
             optimizer_gp.zero_grad()
             output = gp(gp_train_x)
@@ -609,7 +610,7 @@ def train_botorch(n_epochs, x_train, y_train, x_val, y_val, x_test, y_test, n_di
             )
             current_lr = candidate.item()
 
-        # Update optimizer with the suggested learning rate
+        # Update optimizer with the BoTorch learning rate
         opt = torch.optim.Adam(dcrnn.parameters(), lr=current_lr)
 
         # Adjust the number of epochs per BO iteration
@@ -848,7 +849,7 @@ for i in range(10): #8
     dcrnn.train()
     print('training data shape:', x_train.shape, y_train.shape, flush=True)
 
-    train_losses, val_losses, test_losses, z_mu, z_logvar = train_botorch(20,x_train,y_train,x_val, y_val, x_test, y_test,500, 1500) #20000, 5000
+    train_losses, val_losses, test_losses, z_mu, z_logvar = train_botorch(20,x_train,y_train,x_val, y_val, x_test, y_test,500, 1500) #originally 20000, 5000
     y_pred_test = test(torch.from_numpy(x_train).float(),torch.from_numpy(y_train).float(),
                       torch.from_numpy(x_test).float())
 #     print("y_pred_shape: ", y_pred_test.shape)
